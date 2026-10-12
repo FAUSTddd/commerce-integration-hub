@@ -1,0 +1,4 @@
+faustddd_1c_import:
+  endpoint: '/cml/1c_exchange'
+  login: 'admin'
+  password: 'secret_cml_password'

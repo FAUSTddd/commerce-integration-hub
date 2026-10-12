@@ -1,0 +1,4 @@
+faustddd_1c_exchange:
+    path: '%faustddd_1c_import.endpoint%'
+    controller: FaustDDD\Symfony1cImport\Infrastructure\Controller\Import1CController::exchange
+    methods: [GET, POST]
