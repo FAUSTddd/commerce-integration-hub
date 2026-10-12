@@ -2,15 +2,16 @@
 
 declare(strict_types=1);
 
-namespace App\Domain\Model;
+namespace App\Entity;
 
+use App\Repository\ProductRepository;
 use DateTimeImmutable;
 use Doctrine\Common\Collections\ArrayCollection;
 use Doctrine\Common\Collections\Collection;
 use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Mapping as ORM;
 
-#[ORM\Entity]
+#[ORM\Entity(repositoryClass: ProductRepository::class)]
 #[ORM\Table(name: 'products')]
 #[ORM\Index(name: 'idx_products_sku', columns: ['sku'])]
 class Product

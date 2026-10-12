@@ -2,13 +2,14 @@
 
 declare(strict_types=1);
 
-namespace App\Domain\Model;
+namespace App\Entity;
 
+use App\Repository\ImportRunRepository;
 use DateTimeImmutable;
 use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Mapping as ORM;
 
-#[ORM\Entity]
+#[ORM\Entity(repositoryClass: ImportRunRepository::class)]
 #[ORM\Table(name: 'import_runs')]
 #[ORM\Index(name: 'idx_import_runs_status', columns: ['status'])]
 #[ORM\Index(name: 'idx_import_runs_created_at', columns: ['created_at'])]

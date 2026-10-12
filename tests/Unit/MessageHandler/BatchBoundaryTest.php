@@ -2,11 +2,11 @@
 
 declare(strict_types=1);
 
-namespace App\Tests\Unit\Application\Handler;
+namespace App\Tests\Unit\MessageHandler;
 
-use App\Application\Handler\CatalogImportHandler;
-use App\Domain\Model\Product;
-use App\Domain\Repository\ProductRepositoryInterface;
+use App\Entity\Product;
+use App\MessageHandler\CatalogImportHandler;
+use App\Repository\ProductRepository;
 use Doctrine\DBAL\Connection;
 use Doctrine\ORM\EntityManagerInterface;
 use FaustDDD\Symfony1cImport\Application\Command\ImportCatalogCommand;
@@ -31,7 +31,7 @@ final class BatchBoundaryTest extends TestCase
         $em->expects($this->exactly(2))->method('flush');
         $em->expects($this->exactly(2))->method('clear');
 
-        $repo = $this->createMock(ProductRepositoryInterface::class);
+        $repo = $this->createMock(ProductRepository::class);
         $repo->method('findByExternalId')->willReturn(null);
         $repo->expects($this->exactly(105))->method('save');
 
@@ -64,7 +64,7 @@ final class BatchBoundaryTest extends TestCase
         $em->expects($this->once())->method('commit'); // First batch of 100 items was committed successfully
         $em->expects($this->once())->method('rollback'); // Second batch rolls back on error
 
-        $repo = $this->createMock(ProductRepositoryInterface::class);
+        $repo = $this->createMock(ProductRepository::class);
         $repo->method('findByExternalId')->willReturn(null);
 
         // Throw error on item 102 (inside 2nd batch)

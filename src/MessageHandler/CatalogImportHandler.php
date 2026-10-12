@@ -2,12 +2,12 @@
 
 declare(strict_types=1);
 
-namespace App\Application\Handler;
+namespace App\MessageHandler;
 
-use App\Domain\Model\ImportRun;
-use App\Domain\Model\Product;
-use App\Domain\Repository\ImportRunRepositoryInterface;
-use App\Domain\Repository\ProductRepositoryInterface;
+use App\Entity\ImportRun;
+use App\Entity\Product;
+use App\Repository\ImportRunRepository;
+use App\Repository\ProductRepository;
 use Doctrine\DBAL\Connection;
 use Doctrine\ORM\EntityManagerInterface;
 use FaustDDD\Symfony1cImport\Application\Command\ImportCatalogCommand;
@@ -25,8 +25,8 @@ final class CatalogImportHandler extends CatalogImporter
 
     public function __construct(
         private readonly EntityManagerInterface $entityManager,
-        private readonly ProductRepositoryInterface $productRepository,
-        private readonly ?ImportRunRepositoryInterface $importRunRepository = null,
+        private readonly ProductRepository $productRepository,
+        private readonly ?ImportRunRepository $importRunRepository = null,
     ) {}
 
     protected function import(ImportCatalogCommand $command): void

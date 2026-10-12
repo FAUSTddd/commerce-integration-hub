@@ -2,13 +2,13 @@
 
 declare(strict_types=1);
 
-namespace App\Tests\Unit\Application\Handler;
+namespace App\Tests\Unit\MessageHandler;
 
-use App\Application\Handler\OffersImportHandler;
-use App\Domain\Model\Product;
-use App\Domain\Model\ProductVariant;
-use App\Domain\Repository\ProductRepositoryInterface;
-use App\Domain\Repository\ProductVariantRepositoryInterface;
+use App\Entity\Product;
+use App\Entity\ProductVariant;
+use App\MessageHandler\OffersImportHandler;
+use App\Repository\ProductRepository;
+use App\Repository\ProductVariantRepository;
 use Doctrine\ORM\EntityManagerInterface;
 use FaustDDD\Symfony1cImport\Application\Command\ImportOffersCommand;
 use PHPUnit\Framework\TestCase;
@@ -27,13 +27,13 @@ final class OffersImportHandlerTest extends TestCase
             'prod-1002' => $prod2,
         ];
 
-        $productRepo = $this->createMock(ProductRepositoryInterface::class);
+        $productRepo = $this->createMock(ProductRepository::class);
         $productRepo->method('findByExternalId')->willReturnCallback(function (string $extId) use ($products) {
             return $products[$extId] ?? null;
         });
 
         $variantStorage = [];
-        $variantRepo = $this->createMock(ProductVariantRepositoryInterface::class);
+        $variantRepo = $this->createMock(ProductVariantRepository::class);
         $variantRepo->method('findByExternalId')->willReturnCallback(function (string $extId) use (&$variantStorage) {
             return $variantStorage[$extId] ?? null;
         });
@@ -43,7 +43,7 @@ final class OffersImportHandlerTest extends TestCase
 
         $handler = new OffersImportHandler($em, $productRepo, $variantRepo);
 
-        $fixturePath = dirname(__DIR__, 3) . '/Fixtures/import_offers.xml';
+        $fixturePath = dirname(__DIR__, 2) . '/Fixtures/import_offers.xml';
         $command = new ImportOffersCommand($fixturePath);
 
         // 1st run
@@ -63,7 +63,7 @@ final class OffersImportHandlerTest extends TestCase
         $this->assertSame('42.500', $var2->getStock());
 
         // 2nd run with updated prices/stock
-        $updatedFixturePath = dirname(__DIR__, 3) . '/Fixtures/import_offers_updated.xml';
+        $updatedFixturePath = dirname(__DIR__, 2) . '/Fixtures/import_offers_updated.xml';
         $updatedCommand = new ImportOffersCommand($updatedFixturePath);
 
         $handler->__invoke($updatedCommand);

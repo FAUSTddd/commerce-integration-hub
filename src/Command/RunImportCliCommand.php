@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace App\Application\Command;
+namespace App\Command;
 
 use FaustDDD\Symfony1cImport\Application\Command\ImportCatalogCommand;
 use FaustDDD\Symfony1cImport\Application\Command\ImportOffersCommand;

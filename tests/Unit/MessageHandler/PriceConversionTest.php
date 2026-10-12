@@ -2,13 +2,13 @@
 
 declare(strict_types=1);
 
-namespace App\Tests\Unit\Application\Handler;
+namespace App\Tests\Unit\MessageHandler;
 
-use App\Application\Handler\OffersImportHandler;
-use App\Domain\Model\Product;
-use App\Domain\Model\ProductVariant;
-use App\Domain\Repository\ProductRepositoryInterface;
-use App\Domain\Repository\ProductVariantRepositoryInterface;
+use App\Entity\Product;
+use App\Entity\ProductVariant;
+use App\MessageHandler\OffersImportHandler;
+use App\Repository\ProductRepository;
+use App\Repository\ProductVariantRepository;
 use Doctrine\ORM\EntityManagerInterface;
 use PHPUnit\Framework\TestCase;
 use ReflectionMethod;
@@ -21,9 +21,9 @@ final class PriceConversionTest extends TestCase
     protected function setUp(): void
     {
         $em = $this->createMock(EntityManagerInterface::class);
-        $prodRepo = $this->createMock(ProductRepositoryInterface::class);
-        $varRepo = $this->createMock(ProductVariantRepositoryInterface::class);
-        $this->handler = new OffersImportHandler($em, $prodRepo, $varRepo);
+        $productRepo = $this->createMock(ProductRepository::class);
+        $variantRepo = $this->createMock(ProductVariantRepository::class);
+        $this->handler = new OffersImportHandler($em, $productRepo, $variantRepo);
     }
 
     private function parsePrice(string $rawPrice): int

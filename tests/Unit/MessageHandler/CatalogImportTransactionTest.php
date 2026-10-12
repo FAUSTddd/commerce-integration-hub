@@ -2,11 +2,11 @@
 
 declare(strict_types=1);
 
-namespace App\Tests\Unit\Application\Handler;
+namespace App\Tests\Unit\MessageHandler;
 
-use App\Application\Handler\CatalogImportHandler;
-use App\Domain\Model\Product;
-use App\Domain\Repository\ProductRepositoryInterface;
+use App\Entity\Product;
+use App\MessageHandler\CatalogImportHandler;
+use App\Repository\ProductRepository;
 use Doctrine\DBAL\Connection;
 use Doctrine\ORM\EntityManagerInterface;
 use FaustDDD\Symfony1cImport\Application\Command\ImportCatalogCommand;
@@ -22,7 +22,7 @@ final class CatalogImportTransactionTest extends TestCase
 
         $em = $this->createMock(EntityManagerInterface::class);
         $em->method('getConnection')->willReturn($connection);
-        $repo = $this->createMock(ProductRepositoryInterface::class);
+        $repo = $this->createMock(ProductRepository::class);
 
         $em->expects($this->once())->method('beginTransaction');
         $em->expects($this->once())->method('rollback');
@@ -44,15 +44,15 @@ final class CatalogImportTransactionTest extends TestCase
         $em->expects($this->once())->method('beginTransaction');
         $em->expects($this->once())->method('flush'); // Flush 3 products (partial batch < 100)
         $em->expects($this->once())->method('commit');
-        $em->expects($this->once())->method('clear');
+        $em->expects($this->once())->method('clear'); // In finally
 
-        $repo = $this->createMock(ProductRepositoryInterface::class);
+        $repo = $this->createMock(ProductRepository::class);
         $repo->method('findByExternalId')->willReturn(null);
         $repo->expects($this->exactly(3))->method('save');
 
         $handler = new CatalogImportHandler($em, $repo);
 
-        $fixturePath = dirname(__DIR__, 3) . '/Fixtures/import_catalog.xml';
+        $fixturePath = dirname(__DIR__, 2) . '/Fixtures/import_catalog.xml';
         $handler(new ImportCatalogCommand($fixturePath));
     }
 }

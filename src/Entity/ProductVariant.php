@@ -2,13 +2,14 @@
 
 declare(strict_types=1);
 
-namespace App\Domain\Model;
+namespace App\Entity;
 
+use App\Repository\ProductVariantRepository;
 use DateTimeImmutable;
 use Doctrine\DBAL\Types\Types;
 use Doctrine\ORM\Mapping as ORM;
 
-#[ORM\Entity]
+#[ORM\Entity(repositoryClass: ProductVariantRepository::class)]
 #[ORM\Table(name: 'product_variants')]
 #[ORM\Index(name: 'idx_product_variants_product_id', columns: ['product_id'])]
 class ProductVariant

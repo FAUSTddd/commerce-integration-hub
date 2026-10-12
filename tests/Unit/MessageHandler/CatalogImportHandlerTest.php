@@ -2,11 +2,11 @@
 
 declare(strict_types=1);
 
-namespace App\Tests\Unit\Application\Handler;
+namespace App\Tests\Unit\MessageHandler;
 
-use App\Application\Handler\CatalogImportHandler;
-use App\Domain\Model\Product;
-use App\Domain\Repository\ProductRepositoryInterface;
+use App\Entity\Product;
+use App\MessageHandler\CatalogImportHandler;
+use App\Repository\ProductRepository;
 use Doctrine\ORM\EntityManagerInterface;
 use FaustDDD\Symfony1cImport\Application\Command\ImportCatalogCommand;
 use PHPUnit\Framework\TestCase;
@@ -19,7 +19,7 @@ final class CatalogImportHandlerTest extends TestCase
         $em->expects($this->atLeastOnce())->method('flush');
 
         $storage = [];
-        $repo = $this->createMock(ProductRepositoryInterface::class);
+        $repo = $this->createMock(ProductRepository::class);
 
         $repo->method('findByExternalId')->willReturnCallback(function (string $extId) use (&$storage) {
             return $storage[$extId] ?? null;
@@ -31,7 +31,7 @@ final class CatalogImportHandlerTest extends TestCase
 
         $handler = new CatalogImportHandler($em, $repo);
 
-        $fixturePath = dirname(__DIR__, 3) . '/Fixtures/import_catalog.xml';
+        $fixturePath = dirname(__DIR__, 2) . '/Fixtures/import_catalog.xml';
         $command = new ImportCatalogCommand($fixturePath);
 
         // 1st run

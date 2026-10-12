@@ -2,17 +2,16 @@
 
 declare(strict_types=1);
 
-namespace App\Infrastructure\Repository;
+namespace App\Repository;
 
-use App\Domain\Model\ImportRun;
-use App\Domain\Repository\ImportRunRepositoryInterface;
+use App\Entity\ImportRun;
 use Doctrine\Bundle\DoctrineBundle\Repository\ServiceEntityRepository;
 use Doctrine\Persistence\ManagerRegistry;
 
 /**
  * @extends ServiceEntityRepository<ImportRun>
  */
-final class ImportRunRepository extends ServiceEntityRepository implements ImportRunRepositoryInterface
+class ImportRunRepository extends ServiceEntityRepository
 {
     public function __construct(ManagerRegistry $registry)
     {

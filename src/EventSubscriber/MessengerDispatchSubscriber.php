@@ -2,10 +2,10 @@
 
 declare(strict_types=1);
 
-namespace App\Application\EventSubscriber;
+namespace App\EventSubscriber;
 
-use App\Domain\Model\ImportRun;
-use App\Domain\Repository\ImportRunRepositoryInterface;
+use App\Entity\ImportRun;
+use App\Repository\ImportRunRepository;
 use FaustDDD\Symfony1cImport\Application\Command\ImportCatalogCommand;
 use FaustDDD\Symfony1cImport\Application\Command\ImportOffersCommand;
 use Symfony\Component\EventDispatcher\EventSubscriberInterface;
@@ -17,7 +17,7 @@ use Symfony\Component\Messenger\Event\SendMessageToTransportsEvent;
 final class MessengerDispatchSubscriber implements EventSubscriberInterface
 {
     public function __construct(
-        private readonly ImportRunRepositoryInterface $importRunRepository,
+        private readonly ImportRunRepository $importRunRepository,
     ) {}
 
     public static function getSubscribedEvents(): array

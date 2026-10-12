@@ -2,13 +2,13 @@
 
 declare(strict_types=1);
 
-namespace App\Application\Handler;
+namespace App\MessageHandler;
 
-use App\Domain\Model\ImportRun;
-use App\Domain\Model\ProductVariant;
-use App\Domain\Repository\ImportRunRepositoryInterface;
-use App\Domain\Repository\ProductRepositoryInterface;
-use App\Domain\Repository\ProductVariantRepositoryInterface;
+use App\Entity\ImportRun;
+use App\Entity\ProductVariant;
+use App\Repository\ImportRunRepository;
+use App\Repository\ProductRepository;
+use App\Repository\ProductVariantRepository;
 use Doctrine\ORM\EntityManagerInterface;
 use FaustDDD\Symfony1cImport\Application\Command\ImportOffersCommand;
 use FaustDDD\Symfony1cImport\Application\Service\OffersImporter;
@@ -26,9 +26,9 @@ final class OffersImportHandler extends OffersImporter
 
     public function __construct(
         private readonly EntityManagerInterface $entityManager,
-        private readonly ProductRepositoryInterface $productRepository,
-        private readonly ProductVariantRepositoryInterface $variantRepository,
-        private readonly ?ImportRunRepositoryInterface $importRunRepository = null,
+        private readonly ProductRepository $productRepository,
+        private readonly ProductVariantRepository $variantRepository,
+        private readonly ?ImportRunRepository $importRunRepository = null,
         private readonly ?LoggerInterface $logger = null,
     ) {}
 

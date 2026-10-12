@@ -2,17 +2,16 @@
 
 declare(strict_types=1);
 
-namespace App\Infrastructure\Doctrine\Repository;
+namespace App\Repository;
 
-use App\Domain\Model\ProductVariant;
-use App\Domain\Repository\ProductVariantRepositoryInterface;
+use App\Entity\ProductVariant;
 use Doctrine\Bundle\DoctrineBundle\Repository\ServiceEntityRepository;
 use Doctrine\Persistence\ManagerRegistry;
 
 /**
  * @extends ServiceEntityRepository<ProductVariant>
  */
-final class ProductVariantRepository extends ServiceEntityRepository implements ProductVariantRepositoryInterface
+class ProductVariantRepository extends ServiceEntityRepository
 {
     public function __construct(ManagerRegistry $registry)
     {

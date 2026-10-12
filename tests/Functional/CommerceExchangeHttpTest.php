@@ -4,9 +4,9 @@ declare(strict_types=1);
 
 namespace App\Tests\Functional;
 
-use App\Domain\Model\ImportRun;
-use App\Domain\Model\Product;
-use App\Domain\Model\ProductVariant;
+use App\Entity\ImportRun;
+use App\Entity\Product;
+use App\Entity\ProductVariant;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Test\WebTestCase;
 

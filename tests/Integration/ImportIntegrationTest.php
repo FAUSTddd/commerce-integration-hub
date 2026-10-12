@@ -4,10 +4,10 @@ declare(strict_types=1);
 
 namespace App\Tests\Integration;
 
-use App\Domain\Model\Product;
-use App\Domain\Model\ProductVariant;
-use App\Domain\Repository\ProductRepositoryInterface;
-use App\Domain\Repository\ProductVariantRepositoryInterface;
+use App\Entity\Product;
+use App\Entity\ProductVariant;
+use App\Repository\ProductRepository;
+use App\Repository\ProductVariantRepository;
 use Doctrine\DBAL\Connection;
 use Doctrine\ORM\EntityManagerInterface;
 use Doctrine\ORM\Tools\SchemaTool;
@@ -23,8 +23,8 @@ class ImportIntegrationTest extends KernelTestCase
 {
     private ?EntityManagerInterface $entityManager = null;
     private ?MessageBusInterface $messageBus = null;
-    private ?ProductRepositoryInterface $productRepository = null;
-    private ?ProductVariantRepositoryInterface $variantRepository = null;
+    private ?ProductRepository $productRepository = null;
+    private ?ProductVariantRepository $variantRepository = null;
 
     protected function setUp(): void
     {
@@ -33,8 +33,8 @@ class ImportIntegrationTest extends KernelTestCase
 
         $this->entityManager = $container->get(EntityManagerInterface::class);
         $this->messageBus = $container->get(MessageBusInterface::class);
-        $this->productRepository = $container->get(ProductRepositoryInterface::class);
-        $this->variantRepository = $container->get(ProductVariantRepositoryInterface::class);
+        $this->productRepository = $container->get(ProductRepository::class);
+        $this->variantRepository = $container->get(ProductVariantRepository::class);
 
         // Prepare schema in DB
         $schemaTool = new SchemaTool($this->entityManager);
