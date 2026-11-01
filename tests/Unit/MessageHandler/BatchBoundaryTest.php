@@ -17,7 +17,7 @@ use Throwable;
 
 final class BatchBoundaryTest extends TestCase
 {
-    public function testBatchBoundaryTriggersCommitAndReopensTransaction(): void
+    public function testBatchBoundaryTriggersFlushAndClearWithinSingleTransaction(): void
     {
         $connection = $this->createMock(Connection::class);
         $connection->method('isTransactionActive')->willReturn(true);
@@ -25,9 +25,9 @@ final class BatchBoundaryTest extends TestCase
         $em = $this->createMock(EntityManagerInterface::class);
         $em->method('getConnection')->willReturn($connection);
 
-        // Expected: initial beginTransaction, commit on 100 items, beginTransaction for second batch, final commit
-        $em->expects($this->exactly(2))->method('beginTransaction');
-        $em->expects($this->exactly(2))->method('commit');
+        // Expected: single transaction (1 beginTransaction, 1 commit), flush and clear on batch boundary and tail
+        $em->expects($this->once())->method('beginTransaction');
+        $em->expects($this->once())->method('commit');
         $em->expects($this->exactly(2))->method('flush');
         $em->expects($this->exactly(2))->method('clear');
 
@@ -52,7 +52,7 @@ final class BatchBoundaryTest extends TestCase
         }
     }
 
-    public function testErrorInSecondBatchRollbacksOnlyActiveTransaction(): void
+    public function testErrorInSecondBatchRollbacksEntireTransactionWithoutCommits(): void
     {
         $connection = $this->createMock(Connection::class);
         $connection->method('isTransactionActive')->willReturn(true);
@@ -60,9 +60,9 @@ final class BatchBoundaryTest extends TestCase
         $em = $this->createMock(EntityManagerInterface::class);
         $em->method('getConnection')->willReturn($connection);
 
-        $em->expects($this->exactly(2))->method('beginTransaction');
-        $em->expects($this->once())->method('commit'); // First batch of 100 items was committed successfully
-        $em->expects($this->once())->method('rollback'); // Second batch rolls back on error
+        $em->expects($this->once())->method('beginTransaction');
+        $em->expects($this->never())->method('commit'); // No batches are committed on failure
+        $em->expects($this->once())->method('rollback'); // Entire file transaction is rolled back
 
         $repo = $this->createMock(ProductRepository::class);
         $repo->method('findByExternalId')->willReturn(null);

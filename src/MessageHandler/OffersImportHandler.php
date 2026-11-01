@@ -15,6 +15,7 @@ use FaustDDD\Symfony1cImport\Application\Service\OffersImporter;
 use Psr\Log\LoggerInterface;
 use SimpleXMLElement;
 use Symfony\Component\Messenger\Attribute\AsMessageHandler;
+use Symfony\Component\Messenger\Exception\RecoverableMessageHandlingException;
 use Throwable;
 
 #[AsMessageHandler]
@@ -30,6 +31,7 @@ final class OffersImportHandler extends OffersImporter
         private readonly ProductVariantRepository $variantRepository,
         private readonly ?ImportRunRepository $importRunRepository = null,
         private readonly ?LoggerInterface $logger = null,
+        private readonly ?\App\Messenger\ImportRunContext $importRunContext = null,
     ) {}
 
     protected function import(ImportOffersCommand $command): void
@@ -38,7 +40,15 @@ final class OffersImportHandler extends OffersImporter
         $filename = basename($filePath);
         $fileHash = is_file($filePath) ? (string) sha1_file($filePath) : 'unknown';
 
-        $run = $this->importRunRepository?->findLatestPendingOrProcessing('offers', $filename);
+        $run = null;
+        if ($this->importRunContext !== null && $this->importRunContext->getCurrentRunId() !== null) {
+            $run = $this->importRunRepository?->find($this->importRunContext->getCurrentRunId());
+        }
+
+        if ($run === null) {
+            $run = $this->importRunRepository?->findLatestPendingOrProcessing('offers', $filename);
+        }
+
         if ($run === null && $this->importRunRepository !== null) {
             $run = new ImportRun('offers', $filename, $fileHash);
         }
@@ -51,7 +61,6 @@ final class OffersImportHandler extends OffersImporter
         }
 
         $this->count = 0;
-        $totalImported = 0;
 
         $this->entityManager->beginTransaction();
 
@@ -60,21 +69,16 @@ final class OffersImportHandler extends OffersImporter
 
             if ($this->count > 0) {
                 $this->entityManager->flush();
-                $totalImported += $this->count;
             }
 
             $this->entityManager->commit();
 
             if ($this->currentRunId !== null) {
-                $this->markRunSuccess($this->currentRunId, $totalImported);
+                $this->markRunSuccess($this->currentRunId, $this->count);
             }
         } catch (Throwable $e) {
             if ($this->entityManager->getConnection()->isTransactionActive()) {
                 $this->entityManager->rollback();
-            }
-
-            if ($this->currentRunId !== null) {
-                $this->markRunFailed($this->currentRunId, $e->getMessage());
             }
 
             throw $e;
@@ -97,8 +101,18 @@ final class OffersImportHandler extends OffersImporter
 
         $product = $this->productRepository->findByExternalId($productExternalId);
         if ($product === null) {
+            $activeCatalogRun = $this->hasActiveCatalogImport();
+            if ($activeCatalogRun) {
+                $this->logger?->warning(
+                    sprintf('Product "%s" for offer "%s" not found, but catalog import is still active. Postponing offers import.', $productExternalId, $fullExternalId)
+                );
+                throw new RecoverableMessageHandlingException(
+                    sprintf('Catalog import is in progress. Product "%s" not yet available.', $productExternalId)
+                );
+            }
+
             $this->logger?->warning(
-                sprintf('Skipping offer "%s": product "%s" not found in catalog.', $fullExternalId, $productExternalId)
+                sprintf('Skipping offer "%s": product "%s" not found in catalog and no catalog import is in progress.', $fullExternalId, $productExternalId)
             );
             return;
         }
@@ -124,10 +138,7 @@ final class OffersImportHandler extends OffersImporter
         ++$this->count;
         if ($this->count % self::BATCH_SIZE === 0) {
             $this->entityManager->flush();
-            $this->entityManager->commit();
             $this->entityManager->clear();
-
-            $this->entityManager->beginTransaction();
         }
     }
 
@@ -213,6 +224,24 @@ final class OffersImportHandler extends OffersImporter
         return $isNegative ? -$totalCents : $totalCents;
     }
 
+    private function hasActiveCatalogImport(): bool
+    {
+        if ($this->importRunRepository === null) {
+            return false;
+        }
+
+        $activeRun = $this->importRunRepository->createQueryBuilder('r')
+            ->where('r.type = :type')
+            ->andWhere('r.status IN (:statuses)')
+            ->setParameter('type', 'catalog')
+            ->setParameter('statuses', [ImportRun::STATUS_PENDING, ImportRun::STATUS_PROCESSING])
+            ->setMaxResults(1)
+            ->getQuery()
+            ->getOneOrNullResult();
+
+        return $activeRun !== null;
+    }
+
     private function markRunSuccess(int $runId, int $itemsCount): void
     {
         try {
@@ -221,21 +250,6 @@ final class OffersImportHandler extends OffersImporter
                 [
                     'status' => ImportRun::STATUS_SUCCESS,
                     'count' => $itemsCount,
-                    'id' => $runId,
-                ]
-            );
-        } catch (Throwable) {
-        }
-    }
-
-    private function markRunFailed(int $runId, string $errorMessage): void
-    {
-        try {
-            $this->entityManager->getConnection()->executeStatement(
-                'UPDATE import_runs SET status = :status, error_message = :error, finished_at = NOW() WHERE id = :id',
-                [
-                    'status' => ImportRun::STATUS_FAILED,
-                    'error' => mb_substr($errorMessage, 0, 2000),
                     'id' => $runId,
                 ]
             );

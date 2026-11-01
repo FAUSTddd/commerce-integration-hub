@@ -53,6 +53,7 @@ class ImportIntegrationTest extends KernelTestCase
             delivered_at TIMESTAMP(0) WITH TIME ZONE DEFAULT NULL
         )');
         $this->entityManager->getConnection()->executeStatement('DELETE FROM messenger_messages');
+        $this->entityManager->getConnection()->executeStatement('DELETE FROM import_runs');
     }
 
     protected function tearDown(): void
@@ -62,13 +63,13 @@ class ImportIntegrationTest extends KernelTestCase
         $this->entityManager = null;
     }
 
-    private function runWorker(): void
+    private function runWorker(?array $receivers = null): void
     {
         $application = new Application(self::$kernel);
         $application->setAutoExit(false);
         $input = new ArrayInput([
             'command' => 'messenger:consume',
-            'receivers' => ['async'],
+            'receivers' => $receivers ?? ['async_catalog', 'async_offers'],
             '--limit' => 1,
             '--time-limit' => 10,
             '--quiet' => true,
@@ -154,5 +155,322 @@ class ImportIntegrationTest extends KernelTestCase
         $finalCountVariants = (int) $this->entityManager->getConnection()
             ->fetchOne('SELECT COUNT(*) FROM product_variants');
         $this->assertSame(2, $finalCountVariants);
+    }
+
+    public function testFailureInMultiBatchRollsBackAllBatchesInDatabase(): void
+    {
+        // 105 products: first batch of 100, then error on item 102
+        $tmpFile = tempnam(sys_get_temp_dir(), 'cml_e2e_err_');
+        $xmlContent = '<?xml version="1.0" encoding="UTF-8"?><КоммерческаяИнформация ВерсияСхемы="2.09" ДатаФормирования="2026-10-12"><Каталог><Товары>';
+        for ($i = 1; $i <= 101; ++$i) {
+            $xmlContent .= sprintf('<Товар><Ид>rollback-prod-%d</Ид><Наименование>Товар %d</Наименование></Товар>', $i, $i);
+        }
+        // Malformed XML element on item 102 to trigger parser exception mid-stream
+        $xmlContent .= '<Товар><Ид>broken-prod<НЕЗАКРЫТЫЙ_ТЕГ>';
+        $xmlContent .= '</Товары></Каталог></КоммерческаяИнформация>';
+        file_put_contents($tmpFile, $xmlContent);
+
+        try {
+            $this->messageBus->dispatch(new ImportCatalogCommand($tmpFile));
+            $this->runWorker();
+        } finally {
+            @unlink($tmpFile);
+        }
+
+        $this->entityManager->clear();
+        $count = (int) $this->entityManager->getConnection()
+            ->fetchOne("SELECT COUNT(*) FROM products WHERE external_id LIKE 'rollback-prod-%'");
+
+        $this->assertSame(0, $count, 'All batches must be rolled back on failure in single-transaction mode');
+    }
+
+    public function testOffersPostponedWhenCatalogImportIsActive(): void
+    {
+        $fixturesDir = dirname(__DIR__) . '/Fixtures';
+        $offersXml = $fixturesDir . '/import_offers.xml';
+
+        // 1. Создаем активный (PROCESSING) запуск каталога, которого товары еще нет в БД
+        $this->entityManager->getConnection()->executeStatement(
+            "INSERT INTO import_runs (type, filename, file_hash, status, created_at, started_at)
+             VALUES ('catalog', 'import.xml', 'fake_hash', 'PROCESSING', NOW(), NOW())"
+        );
+
+        // 2. Диспатчим офферы
+        $this->messageBus->dispatch(new ImportOffersCommand($offersXml));
+
+        // 3. Запускаем воркер только на async_offers
+        $this->runWorker(['async_offers']);
+
+        // Проверяем, что оффер не был молча пропущен, а остался в очереди (отложен через retry/delay)
+        $msgCount = (int) $this->entityManager->getConnection()
+            ->fetchOne("SELECT COUNT(*) FROM messenger_messages WHERE queue_name = 'offers'");
+        $this->assertSame(1, $msgCount, 'Offer message must be postponed/requeued when catalog import is active');
+
+        // Проверяем, что варианты пока не созданы
+        $variantCount = (int) $this->entityManager->getConnection()
+            ->fetchOne('SELECT COUNT(*) FROM product_variants');
+        $this->assertSame(0, $variantCount);
+    }
+
+    public function testOffersSkippedWithoutLoopWhenNoActiveCatalogImport(): void
+    {
+        $fixturesDir = dirname(__DIR__) . '/Fixtures';
+        $offersXml = $fixturesDir . '/import_offers.xml';
+
+        // 1. Убеждаемся, что нет активных каталогов (import_runs пуст)
+        $this->entityManager->getConnection()->executeStatement('DELETE FROM import_runs');
+
+        // 2. Диспатчим офферы
+        $this->messageBus->dispatch(new ImportOffersCommand($offersXml));
+
+        // 3. Запускаем воркер
+        $this->runWorker(['async_offers']);
+
+        // 4. Сообщение не должно зацикливаться: в очереди offers сообщений не осталось,
+        // так как офферы на отсутствующие товары безопасно пропущены с warning
+        $msgCount = (int) $this->entityManager->getConnection()
+            ->fetchOne("SELECT COUNT(*) FROM messenger_messages WHERE queue_name = 'offers'");
+        $this->assertSame(0, $msgCount, 'Offers must be acknowledged and not loop when no catalog import is active');
+    }
+
+    public function testImportRunBoundViaStampAndPreservedAcrossRetries(): void
+    {
+        $catalogXml = <<<XML
+<?xml version="1.0" encoding="UTF-8"?>
+<КоммерческаяИнформация ВерсияСхемы="2.09" ДатаФормирования="2026-03-29">
+    <Классификатор>
+        <Ид>class-stamp-1</Ид>
+        <Наименование>Классификатор</Наименование>
+    </Классификатор>
+    <Каталог СодержитТолькоИзменения="false">
+        <Ид>cat-stamp-1</Ид>
+        <ИдКлассификатора>class-stamp-1</ИдКлассификатора>
+        <Наименование>Каталог</Наименование>
+        <Товары>
+            <Товар>
+                <Ид>stamp-prod-1</Ид>
+                <Наименование>Stamp Product 1</Наименование>
+            </Товар>
+        </Товары>
+    </Каталог>
+</КоммерческаяИнформация>
+XML;
+        $filePath = sys_get_temp_dir() . '/import_stamp.xml';
+        file_put_contents($filePath, $catalogXml);
+
+        // Dispatched via message bus, triggers SendMessageToTransportsEvent
+        $this->messageBus->dispatch(new ImportCatalogCommand($filePath));
+
+        // Verify ImportRun created in PENDING status before worker consumed
+        $runRepo = $this->entityManager->getRepository(\App\Entity\ImportRun::class);
+        $runs = $runRepo->findBy(['filename' => 'import_stamp.xml']);
+        $this->assertCount(1, $runs);
+        $originalRunId = $runs[0]->getId();
+        $this->assertSame(\App\Entity\ImportRun::STATUS_PENDING, $runs[0]->getStatus());
+
+        // Worker processes async_catalog
+        $this->runWorker(['async_catalog']);
+
+        // Clear EM to inspect refreshed database state
+        $this->entityManager->clear();
+        $runsAfter = $runRepo->findBy(['filename' => 'import_stamp.xml']);
+
+        // Must still be exactly 1 record (no duplicate ImportRun)
+        $this->assertCount(1, $runsAfter);
+        $this->assertSame($originalRunId, $runsAfter[0]->getId());
+        $this->assertSame(\App\Entity\ImportRun::STATUS_SUCCESS, $runsAfter[0]->getStatus());
+
+        @unlink($filePath);
+    }
+
+    public function testAccurateItemsCountOnMultiBatchImport(): void
+    {
+        // 105 товаров: 100 в первом батче (flush/clear) и 5 во втором батче
+        $productsXml = '';
+        for ($i = 1; $i <= 105; $i++) {
+            $productsXml .= sprintf(
+                '<Товар><Ид>count-prod-%d</Ид><Наименование>Count Product %d</Наименование></Товар>',
+                $i,
+                $i
+            );
+        }
+
+        $xml = <<<XML
+<?xml version="1.0" encoding="UTF-8"?>
+<КоммерческаяИнформация ВерсияСхемы="2.09" ДатаФормирования="2026-03-29">
+    <Классификатор><Ид>c-1</Ид><Наименование>C</Наименование></Классификатор>
+    <Каталог СодержитТолькоИзменения="false">
+        <Ид>cat-1</Ид>
+        <ИдКлассификатора>c-1</ИдКлассификатора>
+        <Наименование>Cat</Наименование>
+        <Товары>
+            {$productsXml}
+        </Товары>
+    </Каталог>
+</КоммерческаяИнформация>
+XML;
+        $filePath = sys_get_temp_dir() . '/import_count_test.xml';
+        file_put_contents($filePath, $xml);
+
+        $this->messageBus->dispatch(new ImportCatalogCommand($filePath));
+        $this->runWorker(['async_catalog']);
+
+        $this->entityManager->clear();
+        $runRepo = $this->entityManager->getRepository(\App\Entity\ImportRun::class);
+        $run = $runRepo->findOneBy(['filename' => 'import_count_test.xml']);
+
+        $this->assertNotNull($run);
+        $this->assertSame(\App\Entity\ImportRun::STATUS_SUCCESS, $run->getStatus());
+        $this->assertSame(105, $run->getItemsCount(), 'items_count must be exactly 105 for 105 products across batches');
+
+        @unlink($filePath);
+    }
+
+    public function testEndToEndOffersRetrySucceedsAfterCatalogFinishes(): void
+    {
+        // 1. Создаем активный запуск каталога
+        $catalogRun = new \App\Entity\ImportRun('catalog', 'pending_catalog.xml', 'hash_cat');
+        $catalogRun->setStatus(\App\Entity\ImportRun::STATUS_PROCESSING);
+        $this->entityManager->persist($catalogRun);
+        $this->entityManager->flush();
+
+        // 2. Диспатчим оффер на товар, которого пока нет в БД
+        $fixturesDir = dirname(__DIR__) . '/Fixtures';
+        $offersXml = $fixturesDir . '/import_offers.xml';
+        $this->messageBus->dispatch(new ImportOffersCommand($offersXml));
+
+        // 3. Первый запуск воркера: каталог активен -> оффер выбрасывает RecoverableException -> откладывается
+        $this->runWorker(['async_offers']);
+
+        $this->entityManager->clear();
+        $offersRun = $this->entityManager->getRepository(\App\Entity\ImportRun::class)
+            ->findOneBy(['filename' => 'import_offers.xml']);
+
+        $this->assertNotNull($offersRun);
+        // Запуск не должен быть переведён в статус FAILED при recoverable retry
+        $this->assertNotSame(\App\Entity\ImportRun::STATUS_FAILED, $offersRun->getStatus(), 'ImportRun must NOT be marked FAILED on RecoverableException');
+
+        // Сообщение должно быть в очереди offers (retry/delay)
+        $msgCount = (int) $this->entityManager->getConnection()
+            ->fetchOne("SELECT COUNT(*) FROM messenger_messages WHERE queue_name = 'offers'");
+        $this->assertSame(1, $msgCount);
+
+        // 4. Завершаем каталог и создаем недостающие товары
+        $catalogXml = $fixturesDir . '/import_catalog.xml';
+        $this->messageBus->dispatch(new ImportCatalogCommand($catalogXml));
+        $this->runWorker(['async_catalog']);
+
+        // Проверяем, что товар появился
+        $productCount = (int) $this->entityManager->getConnection()
+            ->fetchOne("SELECT COUNT(*) FROM products WHERE external_id = 'prod-1001'");
+        $this->assertSame(1, $productCount);
+
+        // Помечаем ранее созданный каталог как SUCCESS
+        $catalogRun = $this->entityManager->getRepository(\App\Entity\ImportRun::class)->find($catalogRun->getId());
+        $catalogRun->setStatus(\App\Entity\ImportRun::STATUS_SUCCESS);
+        $this->entityManager->flush();
+
+        // Сбрасываем задержку сообщения в messenger_messages, чтобы воркер забрал его немедленно
+        $this->entityManager->getConnection()->executeStatement(
+            "UPDATE messenger_messages SET available_at = NOW() - INTERVAL '1 minute' WHERE queue_name = 'offers'"
+        );
+
+        // 5. Повторный запуск воркера офферов: теперь товар существует и каталог завершен
+        $this->runWorker(['async_offers']);
+
+        $this->entityManager->clear();
+        // В очереди сообщений не осталось
+        $remainingMsgs = (int) $this->entityManager->getConnection()
+            ->fetchOne("SELECT COUNT(*) FROM messenger_messages WHERE queue_name = 'offers'");
+        $this->assertSame(0, $remainingMsgs);
+
+        // Варианты и цены успешно созданы
+        $variantCount = (int) $this->entityManager->getConnection()
+            ->fetchOne("SELECT COUNT(*) FROM product_variants WHERE external_id = 'prod-1001#var-1'");
+        $this->assertSame(1, $variantCount);
+
+        // Запуск офферов успешно завершен в статусе SUCCESS с той же записью
+        $finalOffersRun = $this->entityManager->getRepository(\App\Entity\ImportRun::class)
+            ->findOneBy(['filename' => 'import_offers.xml']);
+        $this->assertSame($offersRun->getId(), $finalOffersRun->getId(), 'Same ImportRun must be reused');
+        $this->assertSame(\App\Entity\ImportRun::STATUS_SUCCESS, $finalOffersRun->getStatus());
+        $this->assertGreaterThan(0, $finalOffersRun->getItemsCount());
+    }
+
+    public function testExhaustedRetriesMarksImportRunAsFailed(): void
+    {
+        // Проверяем, что при исчерпании всех попыток (max_retries: 0 для catalog)
+        // WorkerMessageFailedEvent ($event->willRetry() === false) переводит ImportRun в FAILED
+        $invalidXml = '<?xml version="1.0"?><BadRoot>';
+        $filePath = sys_get_temp_dir() . '/exhausted_retry_test.xml';
+        file_put_contents($filePath, $invalidXml);
+
+        try {
+            $command = new ImportCatalogCommand($filePath);
+            $this->messageBus->dispatch($command);
+
+            $run = $this->entityManager->getRepository(\App\Entity\ImportRun::class)
+                ->findOneBy(['filename' => basename($filePath)]);
+            $this->assertNotNull($run);
+            $this->assertSame(\App\Entity\ImportRun::STATUS_PENDING, $run->getStatus());
+
+            try {
+                // async_catalog имеет max_retries: 0, поэтому сбой вызывает WorkerMessageFailedEvent с willRetry() === false
+                $this->runWorker(['async_catalog']);
+            } catch (\Throwable $e) {
+                // Worker может выбрасывать исключение при неисправимой ошибке
+            }
+
+            $this->entityManager->clear();
+            $reloadedRun = $this->entityManager->getRepository(\App\Entity\ImportRun::class)->find($run->getId());
+            $this->assertNotNull($reloadedRun);
+            $this->assertSame(\App\Entity\ImportRun::STATUS_FAILED, $reloadedRun->getStatus(), 'ImportRun must be marked FAILED when retries are exhausted');
+            $this->assertNotNull($reloadedRun->getFinishedAt());
+            $this->assertNotEmpty($reloadedRun->getErrorMessage());
+        } finally {
+            @unlink($filePath);
+        }
+    }
+
+    public function testUnrecoverableErrorWithRetriesRemainingDoesNotMarkRunAsFailed(): void
+    {
+        // Для очереди async_offers настроен max_retries: 3.
+        // Обычная ошибка (не RecoverableException) при первой попытке не должна переводить
+        // ImportRun в окончательный статус FAILED, пока сообщение находится в очереди на retry.
+        $tmpFile = tempnam(sys_get_temp_dir(), 'unrec_retry_');
+        $xmlContent = '<?xml version="1.0" encoding="UTF-8"?><КоммерческаяИнформация ВерсияСхемы="2.09" ДатаФормирования="2026-10-12"><ПакетПредложений><Предложения>';
+        $xmlContent .= '<Предложение><Ид>broken-syntax<НЕЗАКРЫТЫЙ_ТЕГ></Предложения></ПакетПредложений></КоммерческаяИнформация>';
+        file_put_contents($tmpFile, $xmlContent);
+
+        try {
+            $command = new ImportOffersCommand($tmpFile);
+            $this->messageBus->dispatch($command);
+
+            $run = $this->entityManager->getRepository(\App\Entity\ImportRun::class)
+                ->findOneBy(['filename' => basename($tmpFile)]);
+            $this->assertNotNull($run);
+            $this->assertSame(\App\Entity\ImportRun::STATUS_PENDING, $run->getStatus());
+
+            // Запускаем 1 обработку воркера offers (max_retries: 3)
+            $this->runWorker(['async_offers']);
+
+            $this->entityManager->clear();
+            $reloadedRun = $this->entityManager->getRepository(\App\Entity\ImportRun::class)->find($run->getId());
+            $this->assertNotNull($reloadedRun);
+
+            // ImportRun НЕ должен быть в статусе FAILED, так как Messenger будет повторять доставку
+            $this->assertNotSame(
+                \App\Entity\ImportRun::STATUS_FAILED,
+                $reloadedRun->getStatus(),
+                'ImportRun must NOT be marked FAILED while Messenger has pending retries remaining'
+            );
+
+            // Проверяем, что сообщение действительно находится в очереди offers на retry
+            $msgCount = (int) $this->entityManager->getConnection()
+                ->fetchOne("SELECT COUNT(*) FROM messenger_messages WHERE queue_name = 'offers'");
+            $this->assertSame(1, $msgCount, 'Message must remain in queue for retry');
+        } finally {
+            @unlink($tmpFile);
+        }
     }
 }

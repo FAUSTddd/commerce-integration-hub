@@ -80,15 +80,15 @@ final class CommerceExchangeHttpTest extends WebTestCase
         $application = new \Symfony\Bundle\FrameworkBundle\Console\Application($kernel);
         $application->setAutoExit(false);
 
-        $input = new \Symfony\Component\Console\Input\ArrayInput([
+        $inputCatalog = new \Symfony\Component\Console\Input\ArrayInput([
             'command' => 'messenger:consume',
-            'receivers' => ['async'],
+            'receivers' => ['async_catalog'],
             '--limit' => 1,
             '--time-limit' => 10,
             '--quiet' => true,
         ]);
         $output = new \Symfony\Component\Console\Output\NullOutput();
-        $exitCode = $application->run($input, $output);
+        $exitCode = $application->run($inputCatalog, $output);
         self::assertSame(0, $exitCode);
 
         // Verify catalog results
@@ -120,7 +120,14 @@ final class CommerceExchangeHttpTest extends WebTestCase
         self::assertStringStartsWith('success', (string) $client->getResponse()->getContent());
 
         // Consume queue for offers
-        $exitCodeOffers = $application->run($input, $output);
+        $inputOffers = new \Symfony\Component\Console\Input\ArrayInput([
+            'command' => 'messenger:consume',
+            'receivers' => ['async_offers'],
+            '--limit' => 1,
+            '--time-limit' => 10,
+            '--quiet' => true,
+        ]);
+        $exitCodeOffers = $application->run($inputOffers, $output);
         self::assertSame(0, $exitCodeOffers);
 
         // Verify offers results

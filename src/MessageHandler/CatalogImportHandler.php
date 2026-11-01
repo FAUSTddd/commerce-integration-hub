@@ -70,10 +70,6 @@ final class CatalogImportHandler extends CatalogImporter
                 $this->entityManager->rollback();
             }
 
-            if ($this->currentRunId !== null) {
-                $this->markRunFailed($this->currentRunId, $e->getMessage());
-            }
-
             throw $e;
         } finally {
             $this->entityManager->clear();
@@ -107,10 +103,7 @@ final class CatalogImportHandler extends CatalogImporter
         ++$this->count;
         if ($this->count % self::BATCH_SIZE === 0) {
             $this->entityManager->flush();
-            $this->entityManager->commit();
             $this->entityManager->clear();
-
-            $this->entityManager->beginTransaction();
         }
     }
 
@@ -122,21 +115,6 @@ final class CatalogImportHandler extends CatalogImporter
                 [
                     'status' => ImportRun::STATUS_SUCCESS,
                     'count' => $itemsCount,
-                    'id' => $runId,
-                ]
-            );
-        } catch (Throwable) {
-        }
-    }
-
-    private function markRunFailed(int $runId, string $errorMessage): void
-    {
-        try {
-            $this->entityManager->getConnection()->executeStatement(
-                'UPDATE import_runs SET status = :status, error_message = :error, finished_at = NOW() WHERE id = :id',
-                [
-                    'status' => ImportRun::STATUS_FAILED,
-                    'error' => mb_substr($errorMessage, 0, 2000),
                     'id' => $runId,
                 ]
             );
