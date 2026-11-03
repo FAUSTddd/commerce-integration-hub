@@ -14,7 +14,6 @@ use Symfony\Component\Console\Tester\CommandTester;
 final class CleanupImportFilesCliCommandTest extends KernelTestCase
 {
     private string $testDir;
-    private EntityManagerInterface $entityManager;
     private ImportRunRepository $repository;
     private CommandTester $commandTester;
 
@@ -23,7 +22,6 @@ final class CleanupImportFilesCliCommandTest extends KernelTestCase
         self::bootKernel();
         $container = static::getContainer();
 
-        $this->entityManager = $container->get(EntityManagerInterface::class);
         $this->repository = $container->get(ImportRunRepository::class);
 
         $this->testDir = sys_get_temp_dir() . '/cml_cleanup_test_' . uniqid();
@@ -133,5 +131,39 @@ final class CleanupImportFilesCliCommandTest extends KernelTestCase
 
         $this->assertSame(0, $this->commandTester->getStatusCode());
         self::assertStringContainsString('Skipping symlink "symlink.xml"', $this->commandTester->getDisplay());
+    }
+
+    public function testRejectsTtlHoursLessThanMinimum(): void
+    {
+        $this->commandTester->execute([
+            '--dir' => $this->testDir,
+            '--ttl-hours' => '0',
+        ]);
+
+        $this->assertSame(2, $this->commandTester->getStatusCode());
+        self::assertStringContainsString('TTL hours option must be at least 1 hour(s)', $this->commandTester->getDisplay());
+
+        $this->commandTester->execute([
+            '--dir' => $this->testDir,
+            '--ttl-hours' => '-5',
+        ]);
+
+        $this->assertSame(2, $this->commandTester->getStatusCode());
+        self::assertStringContainsString('TTL hours option must be at least 1 hour(s)', $this->commandTester->getDisplay());
+    }
+
+    public function testAcceptsMinimumTtlOfOneHour(): void
+    {
+        $oldFile = $this->testDir . '/one_hour_old.xml';
+        file_put_contents($oldFile, '<xml>old</xml>');
+        touch($oldFile, time() - 3700); // 1 hour + 100 sec
+
+        $this->commandTester->execute([
+            '--dir' => $this->testDir,
+            '--ttl-hours' => '1',
+        ]);
+
+        $this->assertSame(0, $this->commandTester->getStatusCode());
+        self::assertFileDoesNotExist($oldFile);
     }
 }

@@ -129,15 +129,33 @@ final class RecoverStaleRunsCliCommand extends Command
         }
 
         $count = 0;
+        $skippedCasCount = 0;
         foreach ($staleRuns as $run) {
-            $run->setStatus(ImportRun::STATUS_FAILED);
-            $run->setFinishedAt(new \DateTimeImmutable());
-            $run->setErrorMessage(sprintf(
+            $runId = $run->getId();
+            if ($runId === null) {
+                continue;
+            }
+
+            $errorMessage = sprintf(
                 'Administrative recovery: stuck in PROCESSING for more than %d hour(s) with no active worker handling message within redelivery window.',
                 $staleHours
-            ));
-            $this->importRunRepository->save($run);
-            $count++;
+            );
+
+            $updated = $this->importRunRepository->markStaleRunFailedCas($runId, $errorMessage);
+
+            if ($updated) {
+                $count++;
+            } else {
+                $skippedCasCount++;
+                $io->warning(sprintf(
+                    ' [CAS-SKIPPED] Run ID #%d status changed concurrently (no longer PROCESSING). State was preserved and not overwritten.',
+                    $runId
+                ));
+            }
+        }
+
+        if ($skippedCasCount > 0) {
+            $io->note(sprintf('%d run(s) skipped due to concurrent state change.', $skippedCasCount));
         }
 
         $io->success(sprintf('Successfully marked %d stale run(s) as FAILED.', $count));

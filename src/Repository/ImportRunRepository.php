@@ -99,6 +99,42 @@ class ImportRunRepository extends ServiceEntityRepository
     }
 
     /**
+     * Atomically marks an ImportRun as FAILED with a strict CAS-predicate (status = 'PROCESSING').
+     *
+     * Returns true if the status was successfully transitioned from PROCESSING to FAILED,
+     * or false if the run was already completed/changed by a worker (status !== 'PROCESSING').
+     */
+    public function markStaleRunFailedCas(int $runId, string $errorMessage): bool
+    {
+        $conn = $this->getEntityManager()->getConnection();
+
+        $rowsAffected = $conn->executeStatement(
+            "UPDATE import_runs
+             SET status = :failedStatus,
+                 error_message = :error,
+                 finished_at = NOW()
+             WHERE id = :id AND status = :processingStatus",
+            [
+                'failedStatus' => ImportRun::STATUS_FAILED,
+                'processingStatus' => ImportRun::STATUS_PROCESSING,
+                'error' => mb_substr($errorMessage, 0, 2000),
+                'id' => $runId,
+            ]
+        );
+
+        if ($rowsAffected === 1) {
+            $em = $this->getEntityManager();
+            $entity = $em->find(ImportRun::class, $runId);
+            if ($entity !== null) {
+                $em->refresh($entity);
+            }
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
      * Atomically marks an ImportRun as FAILED with a strict CAS-predicate (status = 'PENDING').
      *
      * Returns true if the status was successfully transitioned to FAILED,

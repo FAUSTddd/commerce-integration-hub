@@ -52,8 +52,9 @@ final class RecoverStaleRunsCliCommandTest extends KernelTestCase
         $this->assertStringContainsString('[DRY-RUN] Found 1 candidate run(s) eligible for recovery', $tester->getDisplay());
 
         $runAfterDry = $this->importRunRepository->find($staleId);
-        $this->assertSame(ImportRun::STATUS_PROCESSING, $runAfterDry?->getStatus());
-        $this->assertNull($runAfterDry?->getFinishedAt());
+        $this->assertNotNull($runAfterDry);
+        $this->assertSame(ImportRun::STATUS_PROCESSING, $runAfterDry->getStatus());
+        $this->assertNull($runAfterDry->getFinishedAt());
     }
 
     public function testNonInteractiveExecutionWithoutForceFailsAndDoesNotModifyState(): void
@@ -255,5 +256,36 @@ final class RecoverStaleRunsCliCommandTest extends KernelTestCase
 
         $reloaded = $this->importRunRepository->find($targetId);
         $this->assertSame(ImportRun::STATUS_FAILED, $reloaded?->getStatus());
+    }
+
+    public function testCasSkipsRunIfStatusChangedConcurrentlyFromProcessing(): void
+    {
+        $staleRun = new ImportRun('catalog', 'stale_concurrent.xml', 'hash_concurrent');
+        $staleRun->setStatus(ImportRun::STATUS_PROCESSING);
+        $staleRun->setStartedAt(new \DateTimeImmutable('-3 hours'));
+        $this->importRunRepository->save($staleRun);
+        $staleId = $staleRun->getId();
+        $this->assertNotNull($staleId);
+
+        // Чтобы команда обнаружила его в findStaleProcessingRuns, он должен быть в PROCESSING.
+        // Замокаем или протестируем markStaleRunFailedCas напрямую и через команду:
+        // Если статус изменился между выборкой findStaleProcessingRuns и вызовом markStaleRunFailedCas:
+        // Создадим класс команды или имитируем изменение в момент обхода:
+        // Напрямую вызовем markStaleRunFailedCas после того, как статус стал SUCCESS:
+        $this->connection->executeStatement(
+            "UPDATE import_runs SET status = 'SUCCESS', items_count = 100, finished_at = NOW() WHERE id = :id",
+            ['id' => $staleId]
+        );
+
+        $errorMessage = 'Administrative recovery';
+        $casResult = $this->importRunRepository->markStaleRunFailedCas($staleId, $errorMessage);
+        $this->assertFalse($casResult, 'CAS must return false when status is no longer PROCESSING');
+
+        // Проверяем, что в базе статус остался SUCCESS и не был перезаписан
+        static::getContainer()->get('doctrine')->getManager()->clear();
+        $reloaded = $this->importRunRepository->find($staleId);
+        $this->assertNotNull($reloaded);
+        $this->assertSame(ImportRun::STATUS_SUCCESS, $reloaded->getStatus());
+        $this->assertSame(100, $reloaded->getItemsCount());
     }
 }

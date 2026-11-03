@@ -19,6 +19,7 @@ use Symfony\Component\DependencyInjection\Attribute\Autowire;
 )]
 final class CleanupImportFilesCliCommand extends Command
 {
+    public const int MIN_TTL_HOURS = 1;
     private const int DEFAULT_TTL_HOURS = 24;
 
     public function __construct(
@@ -42,8 +43,8 @@ final class CleanupImportFilesCliCommand extends Command
         $io = new SymfonyStyle($input, $output);
 
         $ttlHours = (int) $input->getOption('ttl-hours');
-        if ($ttlHours < 0) {
-            $io->error('TTL hours option must be a non-negative integer.');
+        if ($ttlHours < self::MIN_TTL_HOURS) {
+            $io->error(sprintf('TTL hours option must be at least %d hour(s) for operational safety.', self::MIN_TTL_HOURS));
             return Command::INVALID;
         }
 
