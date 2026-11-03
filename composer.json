@@ -7,11 +7,8 @@
   "prefer-stable": true,
   "repositories": [
     {
-      "type": "path",
-      "url": "../symfony-1c-import",
-      "options": {
-        "symlink": true
-      }
+      "type": "vcs",
+      "url": "https://github.com/FAUSTddd/symfony-1c-import.git"
     }
   ],
   "require": {
@@ -20,7 +17,7 @@
     "doctrine/doctrine-bundle": "^2.13",
     "doctrine/doctrine-migrations-bundle": "^3.4",
     "doctrine/orm": "^3.3",
-    "faustddd/symfony-1c-import": "@dev",
+    "faustddd/symfony-1c-import": "^2.0",
     "symfony/console": "^7.1",
     "symfony/doctrine-messenger": "^7.1",
     "symfony/dotenv": "^7.1",

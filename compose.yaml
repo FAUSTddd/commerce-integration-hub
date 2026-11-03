@@ -8,7 +8,6 @@ services:
     working_dir: /var/www/html
     volumes:
       - .:/var/www/html
-      - ../symfony-1c-import:/var/www/symfony-1c-import
     environment:
       APP_ENV: dev
       DATABASE_URL: "postgresql://${POSTGRES_USER:-commerce_user}:${POSTGRES_PASSWORD:-secret_password}@postgres:5432/${POSTGRES_DB:-commerce_db}?serverVersion=16&charset=utf8"
