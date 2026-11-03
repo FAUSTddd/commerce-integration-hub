@@ -46,5 +46,41 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
+  worker_catalog:
+    build:
+      context: .
+      dockerfile: docker/php/Dockerfile
+    container_name: commerce_hub_worker_catalog
+    restart: unless-stopped
+    working_dir: /var/www/html
+    command: ["php", "-d", "memory_limit=1024M", "bin/console", "messenger:consume", "async_catalog", "--time-limit=3600", "--memory-limit=512M", "-vv"]
+    stop_grace_period: 300s
+    volumes:
+      - .:/var/www/html
+    environment:
+      APP_ENV: dev
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-commerce_user}:${POSTGRES_PASSWORD:-secret_password}@postgres:5432/${POSTGRES_DB:-commerce_db}?serverVersion=16&charset=utf8"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  worker_offers:
+    build:
+      context: .
+      dockerfile: docker/php/Dockerfile
+    container_name: commerce_hub_worker_offers
+    restart: unless-stopped
+    working_dir: /var/www/html
+    command: ["php", "-d", "memory_limit=1024M", "bin/console", "messenger:consume", "async_offers", "--time-limit=3600", "--memory-limit=512M", "-vv"]
+    stop_grace_period: 300s
+    volumes:
+      - .:/var/www/html
+    environment:
+      APP_ENV: dev
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-commerce_user}:${POSTGRES_PASSWORD:-secret_password}@postgres:5432/${POSTGRES_DB:-commerce_db}?serverVersion=16&charset=utf8"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   postgres_data:
