@@ -24,7 +24,6 @@ final class ConcurrentImportDispatchIntegrationTest extends KernelTestCase
     private EntityManagerInterface $entityManager;
     private Connection $primaryConn;
     private MessageBusInterface $bus;
-    private ImportRunRepository $repository;
     private SerializerInterface $serializer;
 
     protected function setUp(): void
@@ -35,7 +34,6 @@ final class ConcurrentImportDispatchIntegrationTest extends KernelTestCase
         $this->entityManager = $container->get(EntityManagerInterface::class);
         $this->primaryConn = $this->entityManager->getConnection();
         $this->bus = $container->get(MessageBusInterface::class);
-        $this->repository = $container->get(ImportRunRepository::class);
         $this->serializer = new PhpSerializer();
 
         $schemaTool = new SchemaTool($this->entityManager);

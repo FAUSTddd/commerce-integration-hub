@@ -11,6 +11,7 @@ use App\Messenger\ImportRunStamp;
 use App\Repository\ImportRunRepository;
 use FaustDDD\Symfony1cImport\Application\Command\ImportCatalogCommand;
 use FaustDDD\Symfony1cImport\Application\Command\ImportOffersCommand;
+use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\NullLogger;
 use RuntimeException;
@@ -21,6 +22,7 @@ use Symfony\Component\Messenger\Middleware\StackInterface;
 
 final class DeduplicateImportMiddlewareTest extends TestCase
 {
+    /** @var ImportRunRepository&MockObject */
     private ImportRunRepository $repository;
     private DeduplicateImportMiddleware $middleware;
 

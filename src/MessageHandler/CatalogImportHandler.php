@@ -12,6 +12,7 @@ use Doctrine\DBAL\Connection;
 use Doctrine\ORM\EntityManagerInterface;
 use FaustDDD\Symfony1cImport\Application\Command\ImportCatalogCommand;
 use FaustDDD\Symfony1cImport\Application\Service\CatalogImporter;
+use FaustDDD\Symfony1cImport\Application\Service\XmlStreamHelper;
 use SimpleXMLElement;
 use Symfony\Component\Messenger\Attribute\AsMessageHandler;
 use Throwable;
@@ -44,27 +45,29 @@ final class CatalogImportHandler extends CatalogImporter
         if ($run !== null) {
             $run->setStatus(ImportRun::STATUS_PROCESSING);
             $run->setStartedAt(new \DateTimeImmutable());
-            $this->importRunRepository?->save($run);
+            $this->importRunRepository->save($run);
             $this->currentRunId = $run->getId();
         }
 
         $this->count = 0;
-        $totalImported = 0;
 
         $this->entityManager->beginTransaction();
 
         try {
-            parent::import($command);
+            XmlStreamHelper::walkPath(
+                $command->filePath,
+                ['Товары', 'Товар'],
+                fn (SimpleXMLElement $item) => $this->handleProduct($item),
+            );
 
             if ($this->count > 0) {
                 $this->entityManager->flush();
-                $totalImported += $this->count;
             }
 
             $this->entityManager->commit();
 
             if ($this->currentRunId !== null) {
-                $this->markRunSuccess($this->currentRunId, $totalImported);
+                $this->markRunSuccess($this->currentRunId, $this->count);
             }
         } catch (Throwable $e) {
             if ($this->entityManager->getConnection()->isTransactionActive()) {

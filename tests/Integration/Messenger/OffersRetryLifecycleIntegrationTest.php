@@ -153,9 +153,9 @@ final class OffersRetryLifecycleIntegrationTest extends KernelTestCase
 
                 // Message must be scheduled in offers queue with a future available_at
                 $row = $conn->fetchAssociative("SELECT available_at FROM messenger_messages WHERE queue_name = 'offers' LIMIT 1");
-                $this->assertNotEmpty($row, "Message must remain in offers queue during retry cycle on execution {$execution}");
+                $this->assertIsArray($row, "Message must remain in offers queue during retry cycle on execution {$execution}");
 
-                $availableAt = new \DateTimeImmutable($row['available_at']);
+                $availableAt = new \DateTimeImmutable((string) $row['available_at']);
                 $delaySec = max(0, $availableAt->getTimestamp() - $tExec->getTimestamp());
                 $delays[] = $delaySec;
                 $attemptTimestamps[] = [
@@ -192,8 +192,8 @@ final class OffersRetryLifecycleIntegrationTest extends KernelTestCase
         $this->assertSame(0, $offersRemaining, 'Offers queue must be empty after retries exhausted');
 
         $failedRow = $conn->fetchAssociative("SELECT id, body FROM messenger_messages WHERE queue_name = 'failed' LIMIT 1");
-        $this->assertNotEmpty($failedRow, 'Message must be moved to failed queue');
-        $this->assertStringContainsString((string) $failingRunId, $failedRow['body'], 'Failed message must retain ImportRunStamp');
+        $this->assertIsArray($failedRow, 'Message must be moved to failed queue');
+        $this->assertStringContainsString((string) $failingRunId, (string) $failedRow['body'], 'Failed message must retain ImportRunStamp');
 
         // 4. Verify subsequent successful message in the same process/worker
         $product = new Product('prod-success-002', 'Success Product', 'SKU-SUCC-002');

@@ -12,6 +12,7 @@ use App\Repository\ProductVariantRepository;
 use Doctrine\ORM\EntityManagerInterface;
 use FaustDDD\Symfony1cImport\Application\Command\ImportOffersCommand;
 use FaustDDD\Symfony1cImport\Application\Service\OffersImporter;
+use FaustDDD\Symfony1cImport\Application\Service\XmlStreamHelper;
 use Psr\Log\LoggerInterface;
 use SimpleXMLElement;
 use Symfony\Component\Messenger\Attribute\AsMessageHandler;
@@ -48,7 +49,7 @@ final class OffersImportHandler extends OffersImporter
         if ($run !== null) {
             $run->setStatus(ImportRun::STATUS_PROCESSING);
             $run->setStartedAt(new \DateTimeImmutable());
-            $this->importRunRepository?->save($run);
+            $this->importRunRepository->save($run);
             $this->currentRunId = $run->getId();
         }
 
@@ -57,7 +58,11 @@ final class OffersImportHandler extends OffersImporter
         $this->entityManager->beginTransaction();
 
         try {
-            parent::import($command);
+            XmlStreamHelper::walkPath(
+                $command->filePath,
+                ['ПакетПредложений', 'Предложения', 'Предложение'],
+                fn (SimpleXMLElement $item) => $this->handleOffer($item),
+            );
 
             if ($this->count > 0) {
                 $this->entityManager->flush();

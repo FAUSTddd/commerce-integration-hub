@@ -32,6 +32,7 @@ final class OffersImportHandlerTest extends TestCase
             return $products[$extId] ?? null;
         });
 
+        /** @var array<string, ProductVariant> $variantStorage */
         $variantStorage = [];
         $variantRepo = $this->createMock(ProductVariantRepository::class);
         $variantRepo->method('findByExternalId')->willReturnCallback(function (string $extId) use (&$variantStorage) {

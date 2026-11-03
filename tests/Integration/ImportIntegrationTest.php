@@ -70,6 +70,9 @@ class ImportIntegrationTest extends KernelTestCase
         $this->entityManager = null;
     }
 
+    /**
+     * @param list<string>|null $receivers
+     */
     private function runWorker(?array $receivers = null): void
     {
         $application = new Application(self::$kernel);

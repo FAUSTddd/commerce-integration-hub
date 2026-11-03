@@ -18,6 +18,7 @@ final class CatalogImportHandlerTest extends TestCase
         $em = $this->createMock(EntityManagerInterface::class);
         $em->expects($this->atLeastOnce())->method('flush');
 
+        /** @var array<string, Product> $storage */
         $storage = [];
         $repo = $this->createMock(ProductRepository::class);
 

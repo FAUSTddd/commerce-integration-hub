@@ -35,19 +35,14 @@ final class DeduplicateImportMiddleware implements MiddlewareInterface
         }
 
         $message = $envelope->getMessage();
-        $type = null;
-        $filePath = null;
-
         if ($message instanceof ImportCatalogCommand) {
             $type = 'catalog';
             $filePath = $message->filePath;
         } elseif ($message instanceof ImportOffersCommand) {
             $type = 'offers';
             $filePath = $message->filePath;
-        }
-
-        // If not a CommerceML import command, pass transparently to next middleware
-        if ($type === null || $filePath === null) {
+        } else {
+            // If not a CommerceML import command, pass transparently to next middleware
             return $stack->next()->handle($envelope, $stack);
         }
 
