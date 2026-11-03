@@ -14,7 +14,8 @@ RUN apk add --no-cache \
     pdo_pgsql \
     intl \
     opcache \
-    zip
+    zip \
+    pcntl
 
 COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 

@@ -38,6 +38,9 @@
     "faustddd/symfony-1c-import": {
         "version": "dev-master"
     },
+    "phpstan/phpstan": {
+        "version": "2.3.5"
+    },
     "phpunit/phpunit": {
         "version": "11.5",
         "recipe": {
