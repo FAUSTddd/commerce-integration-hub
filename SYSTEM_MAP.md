@@ -48,3 +48,13 @@
   - Проект Compose: `hub_worker_test`.
   - Контейнеры: `hub_worker_test_app`, `hub_worker_test_web`, `hub_worker_test_postgres`, `hub_worker_test_worker_catalog`, `hub_worker_test_worker_offers`.
   - Запущен параллельно для изоляции интеграционных тестов и нагрузочных прогонов воркеров без интерференции с основным стеком.
+
+## 6. Worker Graceful Shutdown (PCNTL Invariants)
+- **Системные требования:** расширение PHP `pcntl` скомпилировано в базовом образе (Alpine, PHP 8.4.27). Подтверждена доступность `pcntl_signal()`, `pcntl_async_signals()` и `SignalRegistry::isSupported() = true`. Контейнеры воркеров сконфигурированы со `stop_grace_period: 300s`.
+- **Эмпирическая верификация (стенд `pcntl_stand`):**
+  - Окружение: полностью изолированный стенд (`/tmp/commerce-pcntl-test`, проект `pcntl_stand`, БД `commerce_pcntl_db`, порт 5435).
+  - Сценарий: импорт каталога на 4 000 товаров (`prod-pcntl-1` .. `prod-pcntl-4000`), инициированный через `app:cml:import`.
+  - Перехват сигнала: во время подтвержденного статуса `PROCESSING` и активной записи батчей контейнеру `pcntl_stand_worker_catalog` отправлен сигнал останова через `docker compose stop -t 300 worker_catalog`. В логе зафиксировано: `Received signal 3. Stopping worker.` (номер сигнала в логе требует дополнительного сопоставления со штатным SIGTERM=15).
+  - Результат завершения: воркер штатно завершил обработку всего стрима, выполнил финальный flush и commit транзакции; `ImportRun` (ID=2) переведен в `SUCCESS` с `items_count = 4000`, сообщение подтверждено транспорту (ACK, активная и failed очереди пусты), процесс завершился с `ExitCode = 0`.
+  - Изоляция: контейнер `pcntl_stand_worker_offers` непрерывно оставался в статусе `Up` без перезапусков; основная БД `commerce_db` сохранила полный исходный baseline (110 504 products, 110 503 product_variants, 14 import_runs, 1 сообщение Messenger, 0 изменений).
+- **Границы и ограничения проверки:** сценарий graceful shutdown для воркера `async_offers` и поведение при максимальной нагрузке (стресс-тесты под предельным объемом данных/памяти) в рамках данного прогона не тестировались.
