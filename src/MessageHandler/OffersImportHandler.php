@@ -45,14 +45,6 @@ final class OffersImportHandler extends OffersImporter
             $run = $this->importRunRepository?->find($this->importRunContext->getCurrentRunId());
         }
 
-        if ($run === null) {
-            $run = $this->importRunRepository?->findLatestPendingOrProcessing('offers', $filename);
-        }
-
-        if ($run === null && $this->importRunRepository !== null) {
-            $run = new ImportRun('offers', $filename, $fileHash);
-        }
-
         if ($run !== null) {
             $run->setStatus(ImportRun::STATUS_PROCESSING);
             $run->setStartedAt(new \DateTimeImmutable());

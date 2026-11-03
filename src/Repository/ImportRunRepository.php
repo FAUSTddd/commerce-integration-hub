@@ -39,6 +39,92 @@ class ImportRunRepository extends ServiceEntityRepository
             ->getOneOrNullResult();
     }
 
+    /**
+     * Atomically creates a new ImportRun in PENDING status if no active run (PENDING or PROCESSING)
+     * exists for the given type and filename.
+     *
+     * Relies on PostgreSQL partial unique index:
+     * CREATE UNIQUE INDEX uniq_import_runs_active_type_filename ON import_runs (type, filename)
+     * WHERE status IN ('PENDING', 'PROCESSING');
+     *
+     * Returns the allocated integer ID on success, or null if an active run already exists (ON CONFLICT DO NOTHING).
+     * If the partial unique index does not exist in the database, the DBAL exception is explicitly propagated.
+     */
+    public function tryCreateActiveRun(string $type, string $filename, string $fileHash): ?int
+    {
+        $conn = $this->getEntityManager()->getConnection();
+
+        $sql = <<<SQL
+            INSERT INTO import_runs (type, filename, file_hash, status, items_count, created_at)
+            VALUES (:type, :filename, :fileHash, 'PENDING', 0, NOW())
+            ON CONFLICT (type, filename) WHERE status IN ('PENDING', 'PROCESSING')
+            DO NOTHING
+            RETURNING id
+        SQL;
+
+        $result = $conn->fetchOne($sql, [
+            'type' => $type,
+            'filename' => $filename,
+            'fileHash' => $fileHash,
+        ]);
+
+        return $result !== false && $result !== null ? (int) $result : null;
+    }
+
+    /**
+     * Verifies if any message matching the given runId is present in the transport table.
+     */
+    public function hasMessageForRunId(int $runId): bool
+    {
+        $conn = $this->getEntityManager()->getConnection();
+        $pattern = '%ImportRunStamp%';
+
+        try {
+            $rows = $conn->fetchAllAssociative(
+                'SELECT body FROM messenger_messages WHERE body LIKE :pattern',
+                ['pattern' => $pattern]
+            );
+        } catch (\Throwable) {
+            return false;
+        }
+
+        foreach ($rows as $row) {
+            $body = (string) $row['body'];
+            if ($this->extractImportRunIdFromBody($body) === $runId) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Atomically marks an ImportRun as FAILED with a strict CAS-predicate (status = 'PENDING').
+     *
+     * Returns true if the status was successfully transitioned to FAILED,
+     * or false if the run was already picked up by a worker (status !== 'PENDING').
+     */
+    public function compensateFailedEnqueue(int $runId, string $errorMessage): bool
+    {
+        $conn = $this->getEntityManager()->getConnection();
+
+        $rowsAffected = $conn->executeStatement(
+            "UPDATE import_runs
+             SET status = :failedStatus,
+                 error_message = :error,
+                 finished_at = NOW()
+             WHERE id = :id AND status = :pendingStatus",
+            [
+                'failedStatus' => ImportRun::STATUS_FAILED,
+                'pendingStatus' => ImportRun::STATUS_PENDING,
+                'error' => mb_substr($errorMessage, 0, 2000),
+                'id' => $runId,
+            ]
+        );
+
+        return $rowsAffected > 0;
+    }
+
     public function findLatestPendingOrProcessing(string $type, string $filename): ?ImportRun
     {
         return $this->findActiveRun($type, $filename);

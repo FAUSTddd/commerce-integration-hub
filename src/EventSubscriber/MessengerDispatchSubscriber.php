@@ -38,44 +38,9 @@ final class MessengerDispatchSubscriber implements EventSubscriberInterface
 
     public function onSendMessage(SendMessageToTransportsEvent $event): void
     {
-        $envelope = $event->getEnvelope();
-        $message = $envelope->getMessage();
-
-        $type = null;
-        $filePath = null;
-
-        if ($message instanceof ImportCatalogCommand) {
-            $type = 'catalog';
-            $filePath = $message->filePath;
-        } elseif ($message instanceof ImportOffersCommand) {
-            $type = 'offers';
-            $filePath = $message->filePath;
-        }
-
-        if ($type === null || $filePath === null) {
-            return;
-        }
-
-        // If an ImportRunStamp is already attached, preserve it
-        $existingStamp = $envelope->last(ImportRunStamp::class);
-        if ($existingStamp !== null) {
-            return;
-        }
-
-        $filename = basename($filePath);
-        $fileHash = is_file($filePath) ? (string) sha1_file($filePath) : 'pending_hash';
-
-        // Check if there is already an active (PENDING/PROCESSING) run
-        $run = $this->importRunRepository->findActiveRun($type, $filename);
-        if ($run === null) {
-            $run = new ImportRun($type, $filename, $fileHash);
-            $this->importRunRepository->save($run);
-        }
-
-        $runId = $run->getId();
-        if ($runId !== null) {
-            $event->setEnvelope($envelope->with(new ImportRunStamp($runId)));
-        }
+        // ImportRun allocation, deduplication, and envelope stamp decoration
+        // are handled centrally and authoritatively by DeduplicateImportMiddleware.
+        // No-op to avoid implicit or ambiguous run association.
     }
 
     public function onWorkerMessageReceived(WorkerMessageReceivedEvent $event): void

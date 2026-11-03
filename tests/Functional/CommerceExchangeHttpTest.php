@@ -24,6 +24,13 @@ final class CommerceExchangeHttpTest extends WebTestCase
         $conn->executeStatement('DELETE FROM import_runs');
         $conn->executeStatement('DELETE FROM messenger_messages');
 
+        // Ensure partial unique index exists in test DB for DeduplicateImportMiddleware / tryCreateActiveRun
+        $conn->executeStatement(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uniq_import_runs_active_type_filename
+             ON import_runs (type, filename)
+             WHERE status IN ('PENDING', 'PROCESSING')"
+        );
+
         // 1. Step Checkauth without credentials -> 401 failure
         $client->request('GET', '/cml/1c_exchange?mode=checkauth');
         self::assertResponseStatusCodeSame(401);

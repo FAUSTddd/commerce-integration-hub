@@ -54,6 +54,13 @@ class ImportIntegrationTest extends KernelTestCase
         )');
         $this->entityManager->getConnection()->executeStatement('DELETE FROM messenger_messages');
         $this->entityManager->getConnection()->executeStatement('DELETE FROM import_runs');
+
+        // Ensure partial unique index exists in test DB for DeduplicateImportMiddleware / tryCreateActiveRun
+        $this->entityManager->getConnection()->executeStatement(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uniq_import_runs_active_type_filename
+             ON import_runs (type, filename)
+             WHERE status IN ('PENDING', 'PROCESSING')"
+        );
     }
 
     protected function tearDown(): void

@@ -27,6 +27,7 @@ final class CatalogImportHandler extends CatalogImporter
         private readonly EntityManagerInterface $entityManager,
         private readonly ProductRepository $productRepository,
         private readonly ?ImportRunRepository $importRunRepository = null,
+        private readonly ?\App\Messenger\ImportRunContext $importRunContext = null,
     ) {}
 
     protected function import(ImportCatalogCommand $command): void
@@ -35,9 +36,9 @@ final class CatalogImportHandler extends CatalogImporter
         $filename = basename($filePath);
         $fileHash = is_file($filePath) ? (string) sha1_file($filePath) : 'unknown';
 
-        $run = $this->importRunRepository?->findLatestPendingOrProcessing('catalog', $filename);
-        if ($run === null && $this->importRunRepository !== null) {
-            $run = new ImportRun('catalog', $filename, $fileHash);
+        $run = null;
+        if ($this->importRunContext !== null && $this->importRunContext->getCurrentRunId() !== null) {
+            $run = $this->importRunRepository?->find($this->importRunContext->getCurrentRunId());
         }
 
         if ($run !== null) {
