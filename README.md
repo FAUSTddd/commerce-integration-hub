@@ -29,6 +29,10 @@ docker compose exec -T app php bin/console doctrine:migrations:migrate --no-inte
 ```bash
 docker compose exec -T app php bin/console doctrine:schema:validate
 ```
+> **Важно (Намеренное исключение Schema Drift):**
+> Команда `doctrine:schema:validate` сообщает о расхождении и предлагает удалить индекс `uniq_import_runs_active_type_filename` (`[ERROR] The database schema is not in sync with the current mapping file`).
+> Это **ожидаемое поведение и намеренное архитектурное исключение**: данный частичный индекс (`WHERE status IN ('PENDING', 'PROCESSING')`) создан миграцией `Version20261102000001` и критически необходим для атомарной дедупликации очередей в PostgreSQL (`ON CONFLICT ... DO NOTHING`). Декларативный маппинг Doctrine ORM не поддерживает предикаты `WHERE` для индексов.
+> **Индекс не должен удаляться. Выполнение команды `doctrine:schema:update --force` категорически запрещено.** Все изменения схемы производятся строго через миграции.
 
 ### 4. Запуск всех тестов (Unit + PostgreSQL Integration)
 Создание тестовой БД при первом старте:
