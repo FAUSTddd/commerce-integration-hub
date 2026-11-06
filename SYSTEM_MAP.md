@@ -12,6 +12,7 @@
   - *Происхождение и архитектурное назначение:* создан миграцией `Version20261102000001` в PostgreSQL. Критичен для атомарной дедупликации очередей: на него опирается нативный запрос `ImportRunRepository::tryCreateActiveRun()` (`INSERT ... ON CONFLICT (type, filename) WHERE status IN ('PENDING', 'PROCESSING') DO NOTHING RETURNING id`). Удаление индекса недопустимо (вызывает ошибку PostgreSQL `42P10` и ломает защиту от параллельных дублей).
   - *Намеренное исключение Schema Drift:* `doctrine:schema:validate` сообщает о расхождении и требует `DROP INDEX`, поскольку частичные индексы с предикатом `WHERE` не поддерживаются декларативным маппингом атрибутов Doctrine ORM. Расхождение зафиксировано как намеренное.
   - *Правило безопасности:* выполнение команды `doctrine:schema:update --force` категорически запрещено. Все изменения схемы БД выполняются исключительно через версионированные миграции `doctrine:migrations:migrate`.
+  - *Синхронизация Doctrine Metadata Cache (prod):* выполнена регламентная инвалидация и прогрев метаданных `bin/console cache:clear --env=prod` (создан резервный архив `/var/www/html/var/cache/prod_cache_backup.tar.gz`). Метаданные `ImportRun` в `prod` содержат актуальные поля `attempt`, `fencingToken`, `retryScheduledAt`, `hasDeferredRetry`. Ошибочные команды `DROP` этих полей полностью устранены из `doctrine:schema:update --dump-sql`. Архитектурные инварианты PostgreSQL (частичные индексы `uniq_import_runs_active_type_filename`, `uniq_outbox_active_defer`, `idx_outbox_unpublished`, внешний ключ `import_run_outbox_run_id_fkey`, типы `JSONB` и `BIGSERIAL`) сохранены без изменений. Доступность веб-слоя подтверждена контрольным HTTP probe (401 Unauthorized на `/cml/1c_exchange?type=catalog&mode=checkauth`).
 
 ## 2. Ingress & Routing (Entry Points)
 - **HTTP / CML Exchange:** `/cml/1c_exchange` (`GET|POST`, маршруты `faustddd_1c_exchange`, `import_1c`).
@@ -39,7 +40,31 @@
 - **Управление транзакциями:** 1 XML-файл = 1 транзакция БД. Хэндлер открывает `$entityManager->beginTransaction()` перед чтением стрима, фиксирует `$entityManager->commit()` по завершении или откатывает `$entityManager->rollback()` при `Throwable`.
 - **Связывание офферов:** `OffersImportHandler` парсит `external_id` (разделитель `#`). Если родительский `Product` отсутствует, но каталог еще импортируется (`hasActiveCatalogImport()`), бросает `RecoverableMessageHandlingException` для повторной обработки через ретраи Messenger.
 
-## 5. Runtime Environments & Isolation
+## 5. Outbox Pattern & Exact Outbox ACK
+- **Архитектурное решение Outbox:** Таблица `import_run_outbox` используется для надежной доставки отложенных и повторных сообщений (`defer` / `retry`) с защитой от дублей через частичный индекс `uniq_outbox_active_defer` на `(run_id, kind) WHERE published_at IS NULL AND acked_at IS NULL`.
+- **Штамп трассировки Outbox (`OutboxMessageStamp`):**
+  - При публикации доступных записей `OutboxPublisher::publishAvailableMessages()` сериализованный Envelope декодируется и обогащается штампом `App\Messenger\OutboxMessageStamp($outboxId)` (первичный ключ записи `import_run_outbox`).
+  - При редиспатче в шину Messenger штамп сохраняется через транспортный сериализатор (`SigningSerializer`).
+- **Контекст обработки и точный ACK (`markOutboxAckedById`):**
+  - `MessengerDispatchSubscriber` считывает `OutboxMessageStamp` из Envelope и регистрирует `outboxId` в scoped сервисе `ImportRunContext`.
+  - Хэндлеры импорта (`CatalogImportHandler`, `OffersImportHandler`) при получении подтверждения обработки вызывают точечный метод `ImportRunRepository::markOutboxAckedById($outboxId)`.
+  - Запрос `UPDATE import_run_outbox SET acked_at = NOW() WHERE id = :id AND acked_at IS NULL` гарантирует атомарный ACK строго одной целевой записи без риска случайного квитирования других Outbox-сообщений того же запуска (`run_id`).
+- **Сквозная E2E-верификация (`OffersRetryLifecycleIntegrationTest`):**
+  - Подтвержден полный жизненный цикл ретраев Messenger и перемещения в DLQ (`failed`): задержки экспоненциального бэкоффа (3s, 5s, 9s), сохранение штампа `ImportRunStamp` при трансфере в `failed`, успешный последующий импорт офферов и изоляция сущностей `Product`/`ProductVariant`.
+  - Результат изолированного прогона: **PASS, 1 test, 38 assertions, exit code 0** (время 20.14 с, память 24.00 МБ).
+  - Двухфазный механизм `tearDown()` выполняет адресную очистку по точным базовым именам файлов (`expectedFilenames` на базе `testRunSuffix`), валидирует `createdRunIds` и очищает связанные записи без побочных эффектов для базовых (id=8,9) и диагностических (id=43,44,45,46, message 34,40) артефактов.
+- **Сквозная E2E-верификация (`testConcurrentWorkersDeferUnderActiveLockWithoutLoss`):**
+  - Подтвержден полный жизненный цикл: CAS-блокировка Worker A -> отказ в блокировке Worker B/C -> регистрация Defer в Outbox с дедупликацией -> публикация через `OutboxPublisher` в физическую очередь `messenger_messages` с простановкой `published_at` -> декодирование через контейнерный `SigningSerializer` -> round-trip штампа `OutboxMessageStamp` -> точечный ACK через `markOutboxAckedById` с фиксацией `acked_at IS NOT NULL`.
+  - Результат изолированного прогона: **PASS, 1 test, 14 assertions, exit code 0** (время 84 мс, память 20.00 МБ).
+- **Изоляция окружения и тестовых данных:**
+  - Тестовая фикстура формирует полноценный Envelope с командой и `ImportRunStamp`, сериализуя его через контейнерный `SigningSerializer` в структуру `['body' => $encoded['body']]` с соответствующими `headers`.
+  - В тесте `OutboxLifecycleIntegrationTest` внедрен точный трекинг созданных сущностей: `$createdRunIds` и `$createdMessengerMessageIds`. Метод `tearDown()` выполняет изолированную очистку строго по этим идентификаторам без глобальных `DELETE FROM` и без ошибочных `JOIN` по несуществующим колонкам (`message_id`).
+  - Сохранность данных: в `commerce_db_test` гарантированно сохранены исходные записи (`import_runs` id=8, 9; `import_run_outbox` id=7, 8; `messenger_messages` = 0).
++  - Рабочая база `commerce_db` не затрагивалась (14 import_runs, 1 messenger_messages DLQ).
++  - Все сессионные advisory locks теста сняты (активен только штатный воркер рабочей БД).
++  - **Статус адаптации `OutboxLifecycleIntegrationTest`:** все 5 сценариев класса (`testConcurrentWorkersDeferUnderActiveLockWithoutLoss`, `testCas4AAtomicWithOutboxInsert`, `testOutboxPublisherTransfersToMessengerMessages`, `testParallelPublishersSkipLockedWithoutDuplication`, `testBusyAdvisoryLockSkipsRecordWithoutPublishing`) адаптированы под точечную изоляцию: каждый метод регистрирует сгенерированные runId и messageId в `$createdRunIds` / `$createdMessengerMessageIds`, а `tearDown()` выполняет адресную очистку строго созданных записей, сохраняя базовые строки БД.
++
++## 6. Runtime Environments & Isolation
 - **Основной стек Compose (`workspace/commerce-integration-hub/compose.yaml`):**
   - Проект Compose: `commerce-integration-hub`.
   - Контейнеры: `commerce_hub_app` (PHP 8.4-FPM), `commerce_hub_web` (Nginx, порт 8080:80), `commerce_hub_postgres` (PostgreSQL 16, порт 5432:5432).
@@ -49,7 +74,7 @@
   - Контейнеры: `hub_worker_test_app`, `hub_worker_test_web`, `hub_worker_test_postgres`, `hub_worker_test_worker_catalog`, `hub_worker_test_worker_offers`.
   - Запущен параллельно для изоляции интеграционных тестов и нагрузочных прогонов воркеров без интерференции с основным стеком.
 
-## 6. Worker Graceful Shutdown (PCNTL Invariants)
+## 7. Worker Graceful Shutdown (PCNTL Invariants)
 - **Системные требования:** расширение PHP `pcntl` скомпилировано в базовом образе (Alpine, PHP 8.4.27). Подтверждена доступность `pcntl_signal()`, `pcntl_async_signals()` и `SignalRegistry::isSupported() = true`. Контейнеры воркеров сконфигурированы со `stop_grace_period: 300s`.
 - **Эмпирическая верификация (стенд `pcntl_stand`):**
   - Окружение: полностью изолированный стенд (`/tmp/commerce-pcntl-test`, проект `pcntl_stand`, БД `commerce_pcntl_db`, порт 5435).
