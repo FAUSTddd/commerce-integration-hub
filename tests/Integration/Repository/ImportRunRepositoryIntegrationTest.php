@@ -29,6 +29,8 @@ final class ImportRunRepositoryIntegrationTest extends KernelTestCase
 
         $schemaTool = new SchemaTool($this->entityManager);
         $metadata = $this->entityManager->getMetadataFactory()->getAllMetadata();
+        $this->primaryConn->executeStatement('DROP TABLE IF EXISTS import_run_outbox CASCADE');
+        $this->primaryConn->executeStatement('DROP TABLE IF EXISTS import_runs CASCADE');
         $schemaTool->dropSchema($metadata);
         $schemaTool->createSchema($metadata);
 

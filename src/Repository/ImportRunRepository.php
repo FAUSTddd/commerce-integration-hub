@@ -99,6 +99,426 @@ class ImportRunRepository extends ServiceEntityRepository
     }
 
     /**
+     * Atomically tries to acquire a session-level PostgreSQL advisory lock for the run ID.
+     */
+    public function tryAcquireSessionAdvisoryLock(int $runId): bool
+    {
+        $conn = $this->getEntityManager()->getConnection();
+        return (bool) $conn->fetchOne('SELECT pg_try_advisory_lock(:id)', ['id' => $runId]);
+    }
+
+    /**
+     * Releases the session-level PostgreSQL advisory lock for the run ID.
+     */
+    public function releaseSessionAdvisoryLock(int $runId): bool
+    {
+        $conn = $this->getEntityManager()->getConnection();
+        return (bool) $conn->fetchOne('SELECT pg_advisory_unlock(:id)', ['id' => $runId]);
+    }
+
+    /**
+     * CAS2: Atomically transitions an ImportRun into active PROCESSING state,
+     * assigning a new UUID fencing token and incrementing the attempt counter.
+     * Claim is allowed from PENDING (attempt=0) or from PROCESSING with NULL fencing_token
+     * when retry_scheduled_at is NULL or in the past.
+     *
+     * Returns the assigned UUID fencing token on success, or null on failure.
+     */
+    public function claimRunCas2(int $runId, string $fencingToken): bool
+    {
+        $conn = $this->getEntityManager()->getConnection();
+
+        $sql = <<<SQL
+            UPDATE import_runs
+            SET status = 'PROCESSING',
+                attempt = attempt + 1,
+                fencing_token = :token::uuid,
+                retry_scheduled_at = NULL,
+                has_deferred_retry = FALSE,
+                started_at = COALESCE(started_at, NOW())
+            WHERE id = :id
+              AND (
+                (status = 'PENDING' AND attempt = 0 AND fencing_token IS NULL)
+                OR
+                (status = 'PROCESSING' AND fencing_token IS NULL AND (retry_scheduled_at IS NULL OR retry_scheduled_at <= NOW()))
+                OR
+                (status = 'PROCESSING' AND (retry_scheduled_at IS NULL OR retry_scheduled_at <= NOW()))
+              )
+        SQL;
+
+        $rows = $conn->executeStatement($sql, [
+            'id' => $runId,
+            'token' => $fencingToken,
+        ]);
+
+        if ($rows === 1) {
+            $em = $this->getEntityManager();
+            $entity = $em->find(ImportRun::class, $runId);
+            if ($entity !== null) {
+                $em->refresh($entity);
+            }
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * CAS5: Atomically marks a stale ImportRun as FAILED within a transaction
+     * while holding a transaction-level advisory lock pg_try_advisory_xact_lock.
+     *
+     * Guarantees mutual exclusion with active workers and rejects recovery
+     * if the run was concurrently claimed, modified, or has an unexpired retry_scheduled_at.
+     */
+    public function markStaleRunFailedCas5(
+        int $runId,
+        string $errorMessage,
+        int $expectedAttempt,
+        ?string $expectedToken
+    ): bool {
+        $conn = $this->getEntityManager()->getConnection();
+
+        return (bool) $conn->transactional(function () use ($conn, $runId, $errorMessage, $expectedAttempt, $expectedToken): bool {
+            // 1. Transaction-level advisory lock
+            $locked = (bool) $conn->fetchOne('SELECT pg_try_advisory_xact_lock(:id)', ['id' => $runId]);
+            if (!$locked) {
+                return false;
+            }
+
+            // Check if there are active unpublished or in-flight outbox records
+            $activeOutbox = (bool) $conn->fetchOne(
+                'SELECT 1 FROM import_run_outbox WHERE run_id = :runId AND acked_at IS NULL LIMIT 1',
+                ['runId' => $runId]
+            );
+
+            if ($activeOutbox) {
+                // Active outbox entry exists (pending retry, defer, or in-flight delivery)
+                return false;
+            }
+
+            // 2. CAS predicate check and update - strictly NO increment of attempt!
+            $sql = <<<SQL
+                UPDATE import_runs
+                SET status = 'FAILED',
+                    fencing_token = NULL,
+                    error_message = :error,
+                    finished_at = NOW(),
+                    retry_scheduled_at = NULL,
+                    has_deferred_retry = FALSE
+                WHERE id = :id
+                  AND status = 'PROCESSING'
+                  AND attempt = :expectedAttempt
+                  AND fencing_token IS NOT DISTINCT FROM (:expectedToken)::uuid
+                  AND (retry_scheduled_at IS NULL OR retry_scheduled_at <= NOW())
+            SQL;
+
+            $rows = $conn->executeStatement($sql, [
+                'id' => $runId,
+                'error' => mb_substr($errorMessage, 0, 2000),
+                'expectedAttempt' => $expectedAttempt,
+                'expectedToken' => $expectedToken,
+            ]);
+
+            return $rows === 1;
+        });
+    }
+
+    /**
+     * CAS4A: Transitions an ImportRun into retry waiting state.
+     * Clears fencing_token, sets retry_scheduled_at to the given delay in seconds.
+     */
+    public function markRunForRetryCas4A(
+        int $runId,
+        int $delaySeconds,
+        int $expectedAttempt,
+        ?string $expectedToken
+    ): bool {
+        $conn = $this->getEntityManager()->getConnection();
+
+        $sql = <<<SQL
+            UPDATE import_runs
+            SET fencing_token = NULL,
+                retry_scheduled_at = NOW() + make_interval(secs => :delaySec),
+                has_deferred_retry = FALSE
+            WHERE id = :id
+              AND status = 'PROCESSING'
+              AND attempt = :expectedAttempt
+              AND fencing_token IS NOT DISTINCT FROM (:expectedToken)::uuid
+        SQL;
+
+        $rows = $conn->executeStatement($sql, [
+            'id' => $runId,
+            'delaySec' => $delaySeconds,
+            'expectedAttempt' => $expectedAttempt,
+            'expectedToken' => $expectedToken,
+        ]);
+
+        return $rows === 1;
+    }
+
+    /**
+     * Atomically registers a Defer intent into import_run_outbox when advisory lock is held.
+     * Prevents lost messages by ensuring a persistent outbox task exists before ACK.
+     *
+     * @param array<string, mixed> $headers
+     * @param array<string, mixed> $payload
+     * @return bool True if a new defer was created OR an active unpublished defer already exists
+     */
+    public function scheduleOutboxDeferCas(
+        int $runId,
+        int $attempt,
+        string $queueName,
+        array $headers,
+        array $payload,
+        int $delaySeconds = 3
+    ): bool {
+        $conn = $this->getEntityManager()->getConnection();
+
+        return (bool) $conn->transactional(function () use (
+            $conn,
+            $runId,
+            $attempt,
+            $queueName,
+            $headers,
+            $payload,
+            $delaySeconds
+        ): bool {
+            // Check if there is already an active unpublished defer for this run
+            $hasActiveDefer = (bool) $conn->fetchOne(
+                "SELECT 1 FROM import_run_outbox WHERE run_id = :runId AND kind = 'defer' AND published_at IS NULL",
+                ['runId' => $runId]
+            );
+
+            if ($hasActiveDefer) {
+                return true;
+            }
+
+            $idempotencyKey = sprintf('run:%d:defer:%s', $runId, bin2hex(random_bytes(8)));
+
+            $sqlInsert = <<<SQL
+                INSERT INTO import_run_outbox (
+                    run_id,
+                    attempt,
+                    kind,
+                    idempotency_key,
+                    queue_name,
+                    headers,
+                    payload,
+                    available_at,
+                    created_at
+                ) VALUES (
+                    :runId,
+                    :attempt,
+                    'defer',
+                    :idempotencyKey,
+                    :queueName,
+                    :headers::jsonb,
+                    :payload::jsonb,
+                    NOW() + make_interval(secs => :delaySec),
+                    NOW()
+                )
+                ON CONFLICT (run_id) WHERE (kind = 'defer' AND published_at IS NULL) DO NOTHING
+            SQL;
+
+            $conn->executeStatement($sqlInsert, [
+                'runId' => $runId,
+                'attempt' => $attempt,
+                'idempotencyKey' => $idempotencyKey,
+                'queueName' => $queueName,
+                'headers' => json_encode($headers, JSON_THROW_ON_ERROR),
+                'payload' => json_encode($payload, JSON_THROW_ON_ERROR),
+                'delaySec' => $delaySeconds,
+            ]);
+
+            return true;
+        });
+    }
+
+    /**
+     * Accurately marks an Outbox entry as ACKed (consumed) by primary key ID.
+     * Enforces published_at IS NOT NULL and acked_at IS NULL for idempotency.
+     */
+    public function markOutboxAckedById(int $outboxId): void
+    {
+        $conn = $this->getEntityManager()->getConnection();
+        $conn->executeStatement(
+            'UPDATE import_run_outbox
+             SET acked_at = NOW()
+             WHERE id = :id
+               AND published_at IS NOT NULL
+               AND acked_at IS NULL',
+            ['id' => $outboxId]
+        );
+    }
+
+    /**
+     * Marks an Outbox entry as ACKed (consumed) by the worker.
+     * For 'defer' entries, the worker consumes the message after claimRunCas2 increments attempt (attempt = defer_attempt + 1).
+     * For 'retry' entries, attempt matches the run's expectedAttempt.
+     * Strictly targets published entries for the given run_id matching either current attempt or attempt - 1 (for defer),
+     * preventing ACK of unconsumed or concurrent future attempts.
+     */
+    public function markOutboxAcked(int $runId, int $attempt): void
+    {
+        $conn = $this->getEntityManager()->getConnection();
+        $conn->executeStatement(
+            "UPDATE import_run_outbox
+             SET acked_at = NOW()
+             WHERE run_id = :runId
+               AND published_at IS NOT NULL
+               AND acked_at IS NULL
+               AND (
+                   (kind = 'defer' AND (attempt = :attempt OR attempt = :attempt - 1))
+                   OR
+                   (kind <> 'defer' AND attempt = :attempt)
+               )",
+            ['runId' => $runId, 'attempt' => $attempt]
+        );
+    }
+
+    /**
+     * Attempts to acquire single-flight defer permission.
+     * Sets has_deferred_retry = TRUE if it is currently FALSE.
+     */
+    public function tryAcquireSingleFlightDefer(int $runId): bool
+    {
+        $conn = $this->getEntityManager()->getConnection();
+
+        $sql = <<<SQL
+            UPDATE import_runs
+            SET has_deferred_retry = TRUE
+            WHERE id = :id
+              AND (status = 'PENDING' OR status = 'PROCESSING')
+              AND has_deferred_retry = FALSE
+        SQL;
+
+        return $conn->executeStatement($sql, ['id' => $runId]) === 1;
+    }
+
+    /**
+     * Atomically executes CAS4A and inserts retry message into import_run_outbox.
+     *
+     * @param array<string, mixed> $headers
+     * @param array<string, mixed> $payload
+     */
+    public function markRunForRetryWithOutboxCas4A(
+        int $runId,
+        int $delaySeconds,
+        int $expectedAttempt,
+        ?string $expectedToken,
+        string $queueName,
+        array $headers,
+        array $payload
+    ): bool {
+        $conn = $this->getEntityManager()->getConnection();
+
+        return (bool) $conn->transactional(function () use (
+            $conn,
+            $runId,
+            $delaySeconds,
+            $expectedAttempt,
+            $expectedToken,
+            $queueName,
+            $headers,
+            $payload
+        ): bool {
+            $sqlCas4A = <<<SQL
+                UPDATE import_runs
+                SET fencing_token = NULL,
+                    retry_scheduled_at = NOW() + make_interval(secs => :delaySec),
+                    has_deferred_retry = FALSE
+                WHERE id = :id
+                  AND status = 'PROCESSING'
+                  AND attempt = :expectedAttempt
+                  AND fencing_token IS NOT DISTINCT FROM (:expectedToken)::uuid
+            SQL;
+
+            $rows = $conn->executeStatement($sqlCas4A, [
+                'id' => $runId,
+                'delaySec' => $delaySeconds,
+                'expectedAttempt' => $expectedAttempt,
+                'expectedToken' => $expectedToken,
+            ]);
+
+            if ($rows !== 1) {
+                return false;
+            }
+
+            $sqlOutbox = <<<SQL
+                INSERT INTO import_run_outbox (
+                    run_id,
+                    attempt,
+                    kind,
+                    idempotency_key,
+                    queue_name,
+                    headers,
+                    payload,
+                    available_at,
+                    created_at
+                ) VALUES (
+                    :runId,
+                    :attempt,
+                    'retry',
+                    :idempotencyKey,
+                    :queueName,
+                    :headers::jsonb,
+                    :payload::jsonb,
+                    NOW() + make_interval(secs => :delaySec),
+                    NOW()
+                )
+                ON CONFLICT (idempotency_key) DO NOTHING
+            SQL;
+
+            $idempotencyKey = sprintf('run:%d:attempt:%d:retry', $runId, $expectedAttempt);
+
+            $conn->executeStatement($sqlOutbox, [
+                'runId' => $runId,
+                'attempt' => $expectedAttempt,
+                'idempotencyKey' => $idempotencyKey,
+                'queueName' => $queueName,
+                'headers' => json_encode($headers, JSON_THROW_ON_ERROR),
+                'payload' => json_encode($payload, JSON_THROW_ON_ERROR),
+                'delaySec' => $delaySeconds,
+            ]);
+
+            return true;
+        });
+    }
+
+    /**
+     * CAS4B: Transitions an ImportRun into terminal FAILED state when retries are exhausted.
+     */
+    public function markRunExhaustedFailedCas4B(
+        int $runId,
+        string $errorMessage,
+        int $expectedAttempt,
+        ?string $expectedToken
+    ): bool {
+        $conn = $this->getEntityManager()->getConnection();
+
+        $sql = <<<SQL
+            UPDATE import_runs
+            SET status = 'FAILED',
+                fencing_token = NULL,
+                error_message = :error,
+                finished_at = NOW()
+            WHERE id = :id
+              AND status = 'PROCESSING'
+              AND attempt = :expectedAttempt
+              AND fencing_token IS NOT DISTINCT FROM (:expectedToken)::uuid
+        SQL;
+
+        $rows = $conn->executeStatement($sql, [
+            'id' => $runId,
+            'error' => mb_substr($errorMessage, 0, 2000),
+            'expectedAttempt' => $expectedAttempt,
+            'expectedToken' => $expectedToken,
+        ]);
+
+        return $rows === 1;
+    }
+
+    /**
      * Atomically marks an ImportRun as FAILED with a strict CAS-predicate (status = 'PROCESSING').
      *
      * Returns true if the status was successfully transitioned from PROCESSING to FAILED,
