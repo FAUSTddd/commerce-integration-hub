@@ -46,6 +46,8 @@ final class OffersImportHandlerRunBindingTest extends TestCase
             ->method('find')
             ->with(777)
             ->willReturn($run);
+        $runRepo->method('tryAcquireSessionAdvisoryLock')->willReturn(true);
+        $runRepo->method('claimRunCas2')->willReturn(true);
 
         // findLatestPendingOrProcessing must NEVER be called
         $runRepo->expects($this->never())

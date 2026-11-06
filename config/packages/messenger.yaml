@@ -15,11 +15,11 @@ framework:
                 retry_strategy:
                     max_retries: 0
             async_catalog:
-                dsn: '%env(MESSENGER_TRANSPORT_DSN)%&queue_name=catalog'
+                dsn: '%env(MESSENGER_TRANSPORT_DSN)%&queue_name=catalog&redeliver_timeout=5400'
                 retry_strategy:
                     max_retries: 0
             async_offers:
-                dsn: '%env(MESSENGER_TRANSPORT_DSN)%&queue_name=offers'
+                dsn: '%env(MESSENGER_TRANSPORT_DSN)%&queue_name=offers&redeliver_timeout=900'
                 retry_strategy:
                     max_retries: 3
                     delay: 2000
