@@ -13,6 +13,7 @@ use Doctrine\ORM\Mapping as ORM;
 #[ORM\Table(name: 'import_runs')]
 #[ORM\Index(name: 'idx_import_runs_status', columns: ['status'])]
 #[ORM\Index(name: 'idx_import_runs_created_at', columns: ['created_at'])]
+#[ORM\Index(name: 'idx_import_runs_retry_scheduled_at', columns: ['retry_scheduled_at'])]
 class ImportRun
 {
     public const string STATUS_PENDING = 'PENDING';
@@ -51,6 +52,18 @@ class ImportRun
 
     #[ORM\Column(name: 'finished_at', type: Types::DATETIMETZ_IMMUTABLE, nullable: true)]
     private ?DateTimeImmutable $finishedAt = null;
+
+    #[ORM\Column(name: 'attempt', type: Types::INTEGER, nullable: false, options: ['default' => 0])]
+    private int $attempt = 0;
+
+    #[ORM\Column(name: 'fencing_token', type: Types::GUID, nullable: true)]
+    private ?string $fencingToken = null;
+
+    #[ORM\Column(name: 'retry_scheduled_at', type: Types::DATETIMETZ_IMMUTABLE, nullable: true)]
+    private ?DateTimeImmutable $retryScheduledAt = null;
+
+    #[ORM\Column(name: 'has_deferred_retry', type: Types::BOOLEAN, nullable: false, options: ['default' => false])]
+    private bool $hasDeferredRetry = false;
 
     public function __construct(string $type, string $filename, string $fileHash)
     {
@@ -138,6 +151,50 @@ class ImportRun
     public function setFinishedAt(?DateTimeImmutable $finishedAt): self
     {
         $this->finishedAt = $finishedAt;
+        return $this;
+    }
+
+    public function getAttempt(): int
+    {
+        return $this->attempt;
+    }
+
+    public function setAttempt(int $attempt): self
+    {
+        $this->attempt = $attempt;
+        return $this;
+    }
+
+    public function getFencingToken(): ?string
+    {
+        return $this->fencingToken;
+    }
+
+    public function setFencingToken(?string $fencingToken): self
+    {
+        $this->fencingToken = $fencingToken;
+        return $this;
+    }
+
+    public function getRetryScheduledAt(): ?DateTimeImmutable
+    {
+        return $this->retryScheduledAt;
+    }
+
+    public function setRetryScheduledAt(?DateTimeImmutable $retryScheduledAt): self
+    {
+        $this->retryScheduledAt = $retryScheduledAt;
+        return $this;
+    }
+
+    public function isHasDeferredRetry(): bool
+    {
+        return $this->hasDeferredRetry;
+    }
+
+    public function setHasDeferredRetry(bool $hasDeferredRetry): self
+    {
+        $this->hasDeferredRetry = $hasDeferredRetry;
         return $this;
     }
 }
