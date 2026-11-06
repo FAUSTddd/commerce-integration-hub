@@ -5,9 +5,9 @@ declare(strict_types=1);
 namespace App\Tests\Integration\Command;
 
 use App\Entity\ImportRun;
-use App\Entity\Product;
 use App\Messenger\ImportRunStamp;
 use App\Repository\ImportRunRepository;
+use Doctrine\DBAL\ArrayParameterType;
 use Doctrine\DBAL\Connection;
 use Symfony\Bundle\FrameworkBundle\Console\Application;
 use Symfony\Bundle\FrameworkBundle\Test\KernelTestCase;
@@ -20,28 +20,162 @@ final class RecoverStaleRunsCliCommandTest extends KernelTestCase
     private ImportRunRepository $importRunRepository;
     private Application $application;
     private Connection $connection;
+    private PhpSerializer $serializer;
+
+    private string $testRunSuffix;
+
+    /**
+     * @var list<int>
+     */
+    private array $initialQueueMessageIds = [];
+
+    /**
+     * @var list<int>
+     */
+    private array $baselineGuardMessageIds = [];
+
+    /**
+     * @var list<int>
+     */
+    private array $createdRunIds = [];
+
+    /**
+     * @var list<int>
+     */
+    private array $createdMessageIds = [];
 
     protected function setUp(): void
     {
         self::bootKernel();
-        $this->importRunRepository = static::getContainer()->get(ImportRunRepository::class);
-        $this->application = new Application(static::$kernel);
-        $this->connection = static::getContainer()->get(Connection::class);
 
-        // Очищаем тестовые таблицы перед каждым тестом
-        $this->connection->executeStatement('DELETE FROM messenger_messages');
-        $this->connection->executeStatement('DELETE FROM product_variants');
-        $this->connection->executeStatement('DELETE FROM products');
-        $this->connection->executeStatement('DELETE FROM import_runs');
+        $env = $_SERVER['APP_ENV'] ?? $_ENV['APP_ENV'] ?? null;
+        if ($env !== 'test') {
+            throw new \RuntimeException('ABORT: Test must run with APP_ENV=test. Current: ' . (string) $env);
+        }
+
+        $container = static::getContainer();
+        $this->importRunRepository = $container->get(ImportRunRepository::class);
+        $this->application = new Application(static::$kernel);
+        $this->connection = $container->get(Connection::class);
+        $this->serializer = new PhpSerializer();
+
+        $dbName = $this->connection->getDatabase();
+        if ($dbName !== 'commerce_db_test') {
+            throw new \RuntimeException('ABORT: Test DB must be commerce_db_test. Current DB: ' . (string) $dbName);
+        }
+
+        $this->testRunSuffix = bin2hex(random_bytes(6));
+        $this->createdRunIds = [];
+        $this->createdMessageIds = [];
+        $this->baselineGuardMessageIds = [];
+
+        // Snapshot existing baseline message IDs
+        $rawInitialIds = $this->connection->fetchFirstColumn('SELECT id FROM messenger_messages');
+        $this->initialQueueMessageIds = array_map('intval', $rawInitialIds);
+
+        // Insert temporary guard messages for baseline PROCESSING runs 8 and 9 so
+        // isRunActivelyHandledByWorker() flags them as protected during command execution
+        $now = (new \DateTimeImmutable('now', new \DateTimeZone('UTC')))->format('Y-m-d H:i:s');
+        foreach ([8, 9] as $baselineRunId) {
+            $envelope = new Envelope(new \stdClass(), [new ImportRunStamp($baselineRunId)]);
+            $encoded = $this->serializer->encode($envelope);
+
+            $id = $this->connection->fetchOne(
+                "INSERT INTO messenger_messages (body, headers, queue_name, created_at, available_at, delivered_at)
+                 VALUES (:body, :headers, 'async_catalog', :created, :available, :delivered)
+                 RETURNING id",
+                [
+                    'body' => $encoded['body'],
+                    'headers' => json_encode($encoded['headers'] ?? []),
+                    'created' => $now,
+                    'available' => $now,
+                    'delivered' => $now,
+                ]
+            );
+            $this->baselineGuardMessageIds[] = (int) $id;
+        }
+    }
+
+    protected function tearDown(): void
+    {
+        $cleanupException = null;
+        $parentException = null;
+
+        try {
+            if ($this->connection->isConnected()) {
+                // 1. Remove baseline guard messages
+                if (!empty($this->baselineGuardMessageIds)) {
+                    $this->connection->executeStatement(
+                        'DELETE FROM messenger_messages WHERE id IN (:ids)',
+                        ['ids' => $this->baselineGuardMessageIds],
+                        ['ids' => ArrayParameterType::INTEGER]
+                    );
+                    $this->baselineGuardMessageIds = [];
+                }
+
+                // 2. Remove test-created messenger messages
+                if (!empty($this->createdMessageIds)) {
+                    $this->connection->executeStatement(
+                        'DELETE FROM messenger_messages WHERE id IN (:ids)',
+                        ['ids' => $this->createdMessageIds],
+                        ['ids' => ArrayParameterType::INTEGER]
+                    );
+                    $this->createdMessageIds = [];
+                }
+
+                // 3. Remove test-created outbox records (if any were produced)
+                if (!empty($this->createdRunIds)) {
+                    $this->connection->executeStatement(
+                        'DELETE FROM import_run_outbox WHERE run_id IN (:runIds)',
+                        ['runIds' => $this->createdRunIds],
+                        ['runIds' => ArrayParameterType::INTEGER]
+                    );
+
+                    // 4. Remove test-created import runs
+                    $this->connection->executeStatement(
+                        'DELETE FROM import_runs WHERE id IN (:runIds)',
+                        ['runIds' => $this->createdRunIds],
+                        ['runIds' => ArrayParameterType::INTEGER]
+                    );
+                    $this->createdRunIds = [];
+                }
+            }
+        } catch (\Throwable $e) {
+            $cleanupException = $e;
+        } finally {
+            try {
+                parent::tearDown();
+            } catch (\Throwable $e) {
+                $parentException = $e;
+            }
+
+            if ($cleanupException !== null && $parentException !== null) {
+                throw new \RuntimeException(
+                    sprintf("Multiple tearDown failures:
+Cleanup: %s
+Parent: %s", $cleanupException->getMessage(), $parentException->getMessage()),
+                    0,
+                    $cleanupException
+                );
+            }
+            if ($cleanupException !== null) {
+                throw $cleanupException;
+            }
+            if ($parentException !== null) {
+                throw $parentException;
+            }
+        }
     }
 
     public function testDryRunDoesNotModifyDatabase(): void
     {
-        $staleRun = new ImportRun('catalog', 'stale_test.xml', 'hash1');
+        $filename = 'stale_test_' . $this->testRunSuffix . '.xml';
+        $staleRun = new ImportRun('catalog', $filename, 'hash1');
         $staleRun->setStatus(ImportRun::STATUS_PROCESSING);
         $staleRun->setStartedAt(new \DateTimeImmutable('-3 hours'));
         $this->importRunRepository->save($staleRun);
-        $staleId = $staleRun->getId();
+        $staleId = (int) $staleRun->getId();
+        $this->createdRunIds[] = $staleId;
 
         $command = $this->application->find('app:cml:recover-stale-runs');
         $tester = new CommandTester($command);
@@ -59,11 +193,13 @@ final class RecoverStaleRunsCliCommandTest extends KernelTestCase
 
     public function testNonInteractiveExecutionWithoutForceFailsAndDoesNotModifyState(): void
     {
-        $staleRun = new ImportRun('catalog', 'stale_test.xml', 'hash1');
+        $filename = 'stale_test_' . $this->testRunSuffix . '.xml';
+        $staleRun = new ImportRun('catalog', $filename, 'hash1');
         $staleRun->setStatus(ImportRun::STATUS_PROCESSING);
         $staleRun->setStartedAt(new \DateTimeImmutable('-3 hours'));
         $this->importRunRepository->save($staleRun);
-        $staleId = $staleRun->getId();
+        $staleId = (int) $staleRun->getId();
+        $this->createdRunIds[] = $staleId;
 
         $command = $this->application->find('app:cml:recover-stale-runs');
         $tester = new CommandTester($command);
@@ -80,18 +216,22 @@ final class RecoverStaleRunsCliCommandTest extends KernelTestCase
     public function testForcedRecoveryMarksStaleRunsFailedAndLeavesFreshUntouched(): void
     {
         // 1. Создаём зависший run старше 3 часов без активных сообщений
-        $staleRun = new ImportRun('catalog', 'stale_test.xml', 'hash1');
+        $staleFilename = 'stale_test_' . $this->testRunSuffix . '.xml';
+        $staleRun = new ImportRun('catalog', $staleFilename, 'hash1');
         $staleRun->setStatus(ImportRun::STATUS_PROCESSING);
         $staleRun->setStartedAt(new \DateTimeImmutable('-3 hours'));
         $this->importRunRepository->save($staleRun);
-        $staleId = $staleRun->getId();
+        $staleId = (int) $staleRun->getId();
+        $this->createdRunIds[] = $staleId;
 
         // 2. Создаём свежий run (30 минут назад)
-        $freshRun = new ImportRun('offers', 'fresh_test.xml', 'hash2');
+        $freshFilename = 'fresh_test_' . $this->testRunSuffix . '.xml';
+        $freshRun = new ImportRun('offers', $freshFilename, 'hash2');
         $freshRun->setStatus(ImportRun::STATUS_PROCESSING);
         $freshRun->setStartedAt(new \DateTimeImmutable('-30 minutes'));
         $this->importRunRepository->save($freshRun);
-        $freshId = $freshRun->getId();
+        $freshId = (int) $freshRun->getId();
+        $this->createdRunIds[] = $freshId;
 
         $command = $this->application->find('app:cml:recover-stale-runs');
         $tester = new CommandTester($command);
@@ -114,11 +254,13 @@ final class RecoverStaleRunsCliCommandTest extends KernelTestCase
 
     public function testInteractiveConfirmationAbortedLeavesStateIntact(): void
     {
-        $staleRun = new ImportRun('catalog', 'stale_abort.xml', 'hash_abort');
+        $filename = 'stale_abort_' . $this->testRunSuffix . '.xml';
+        $staleRun = new ImportRun('catalog', $filename, 'hash_abort');
         $staleRun->setStatus(ImportRun::STATUS_PROCESSING);
         $staleRun->setStartedAt(new \DateTimeImmutable('-3 hours'));
         $this->importRunRepository->save($staleRun);
-        $staleId = $staleRun->getId();
+        $staleId = (int) $staleRun->getId();
+        $this->createdRunIds[] = $staleId;
 
         $command = $this->application->find('app:cml:recover-stale-runs');
         $tester = new CommandTester($command);
@@ -137,25 +279,27 @@ final class RecoverStaleRunsCliCommandTest extends KernelTestCase
     public function testMessageWithinRedeliverTimeoutProtectsAgainstRecovery(): void
     {
         // Создаём длительный run (> 3 часов)
-        $run = new ImportRun('catalog', 'long_running_worker.xml', 'hash_long');
+        $filename = 'long_running_worker_' . $this->testRunSuffix . '.xml';
+        $run = new ImportRun('catalog', $filename, 'hash_long');
         $run->setStatus(ImportRun::STATUS_PROCESSING);
         $run->setStartedAt(new \DateTimeImmutable('-3 hours'));
         $this->importRunRepository->save($run);
-        $runId = $run->getId();
+        $runId = (int) $run->getId();
+        $this->createdRunIds[] = $runId;
 
         // Сообщение находится в процессе обработки с delivered_at 15 минут назад (< 1 час redeliver_timeout)
-        $serializer = new PhpSerializer();
         $msg = new \stdClass();
         $msg->test = true;
         $envelope = new Envelope($msg, [new ImportRunStamp($runId)]);
-        $encoded = $serializer->encode($envelope);
+        $encoded = $this->serializer->encode($envelope);
 
         $now = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
         $fifteenMinutesAgo = $now->modify('-15 minutes');
 
-        $this->connection->executeStatement(
+        $msgId = $this->connection->fetchOne(
             'INSERT INTO messenger_messages (body, headers, queue_name, created_at, available_at, delivered_at)
-             VALUES (:body, :headers, :queue, :created, :available, :delivered)',
+             VALUES (:body, :headers, :queue, :created, :available, :delivered)
+             RETURNING id',
             [
                 'body' => $encoded['body'],
                 'headers' => json_encode($encoded['headers'] ?? []),
@@ -165,6 +309,7 @@ final class RecoverStaleRunsCliCommandTest extends KernelTestCase
                 'delivered' => $fifteenMinutesAgo->format('Y-m-d H:i:s'),
             ]
         );
+        $this->createdMessageIds[] = (int) $msgId;
 
         $command = $this->application->find('app:cml:recover-stale-runs');
         $tester = new CommandTester($command);
@@ -181,22 +326,24 @@ final class RecoverStaleRunsCliCommandTest extends KernelTestCase
     public function testMessageInQueueWithoutDeliveredAtDoesNotBlockRecovery(): void
     {
         // Создаём старый run (> 3 часов)
-        $run = new ImportRun('catalog', 'unprocessed_queue_msg.xml', 'hash_queue');
+        $filename = 'unprocessed_queue_msg_' . $this->testRunSuffix . '.xml';
+        $run = new ImportRun('catalog', $filename, 'hash_queue');
         $run->setStatus(ImportRun::STATUS_PROCESSING);
         $run->setStartedAt(new \DateTimeImmutable('-3 hours'));
         $this->importRunRepository->save($run);
-        $runId = $run->getId();
+        $runId = (int) $run->getId();
+        $this->createdRunIds[] = $runId;
 
         // Сообщение находится в очереди, НО delivered_at IS NULL (воркер не брал его)
-        $serializer = new PhpSerializer();
         $msg = new \stdClass();
         $envelope = new Envelope($msg, [new ImportRunStamp($runId)]);
-        $encoded = $serializer->encode($envelope);
+        $encoded = $this->serializer->encode($envelope);
 
         $now = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
-        $this->connection->executeStatement(
+        $msgId = $this->connection->fetchOne(
             'INSERT INTO messenger_messages (body, headers, queue_name, created_at, available_at, delivered_at)
-             VALUES (:body, :headers, :queue, :created, :available, NULL)',
+             VALUES (:body, :headers, :queue, :created, :available, NULL)
+             RETURNING id',
             [
                 'body' => $encoded['body'],
                 'headers' => json_encode($encoded['headers'] ?? []),
@@ -205,6 +352,7 @@ final class RecoverStaleRunsCliCommandTest extends KernelTestCase
                 'available' => $now->format('Y-m-d H:i:s'),
             ]
         );
+        $this->createdMessageIds[] = (int) $msgId;
 
         $command = $this->application->find('app:cml:recover-stale-runs');
         $tester = new CommandTester($command);
@@ -219,24 +367,25 @@ final class RecoverStaleRunsCliCommandTest extends KernelTestCase
 
     public function testMessageWithDifferentRunIdInBodyDoesNotProtectTargetRun(): void
     {
-        // Создаём run с ID = 12
-        $targetRun = new ImportRun('catalog', 'target_run.xml', 'hash_target');
+        $filename = 'target_run_' . $this->testRunSuffix . '.xml';
+        $targetRun = new ImportRun('catalog', $filename, 'hash_target');
         $targetRun->setStatus(ImportRun::STATUS_PROCESSING);
         $targetRun->setStartedAt(new \DateTimeImmutable('-3 hours'));
         $this->importRunRepository->save($targetRun);
-        $targetId = $targetRun->getId();
+        $targetId = (int) $targetRun->getId();
+        $this->createdRunIds[] = $targetId;
 
-        // Создаём сообщение в messenger_messages, содержащее ImportRunStamp с ID = 123 (где "12" является подстрокой!)
+        // Создаём сообщение в messenger_messages, содержащее ImportRunStamp с ID = 12000 + targetId
         $differentRunId = 12000 + $targetId;
-        $serializer = new PhpSerializer();
         $msg = new \stdClass();
         $envelope = new Envelope($msg, [new ImportRunStamp($differentRunId)]);
-        $encoded = $serializer->encode($envelope);
+        $encoded = $this->serializer->encode($envelope);
 
         $now = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
-        $this->connection->executeStatement(
+        $msgId = $this->connection->fetchOne(
             'INSERT INTO messenger_messages (body, headers, queue_name, created_at, available_at, delivered_at)
-             VALUES (:body, :headers, :queue, :created, :available, :delivered)',
+             VALUES (:body, :headers, :queue, :created, :available, :delivered)
+             RETURNING id',
             [
                 'body' => $encoded['body'],
                 'headers' => json_encode($encoded['headers'] ?? []),
@@ -246,6 +395,7 @@ final class RecoverStaleRunsCliCommandTest extends KernelTestCase
                 'delivered' => $now->format('Y-m-d H:i:s'),
             ]
         );
+        $this->createdMessageIds[] = (int) $msgId;
 
         $command = $this->application->find('app:cml:recover-stale-runs');
         $tester = new CommandTester($command);
@@ -260,18 +410,14 @@ final class RecoverStaleRunsCliCommandTest extends KernelTestCase
 
     public function testCasSkipsRunIfStatusChangedConcurrentlyFromProcessing(): void
     {
-        $staleRun = new ImportRun('catalog', 'stale_concurrent.xml', 'hash_concurrent');
+        $filename = 'stale_concurrent_' . $this->testRunSuffix . '.xml';
+        $staleRun = new ImportRun('catalog', $filename, 'hash_concurrent');
         $staleRun->setStatus(ImportRun::STATUS_PROCESSING);
         $staleRun->setStartedAt(new \DateTimeImmutable('-3 hours'));
         $this->importRunRepository->save($staleRun);
-        $staleId = $staleRun->getId();
-        $this->assertNotNull($staleId);
+        $staleId = (int) $staleRun->getId();
+        $this->createdRunIds[] = $staleId;
 
-        // Чтобы команда обнаружила его в findStaleProcessingRuns, он должен быть в PROCESSING.
-        // Замокаем или протестируем markStaleRunFailedCas напрямую и через команду:
-        // Если статус изменился между выборкой findStaleProcessingRuns и вызовом markStaleRunFailedCas:
-        // Создадим класс команды или имитируем изменение в момент обхода:
-        // Напрямую вызовем markStaleRunFailedCas после того, как статус стал SUCCESS:
         $this->connection->executeStatement(
             "UPDATE import_runs SET status = 'SUCCESS', items_count = 100, finished_at = NOW() WHERE id = :id",
             ['id' => $staleId]

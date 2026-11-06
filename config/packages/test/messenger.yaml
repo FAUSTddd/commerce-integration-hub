@@ -1,0 +1,6 @@
+when@test:
+    framework:
+        messenger:
+            transports:
+                async_offers:
+                    dsn: '%env(MESSENGER_TRANSPORT_DSN)%&queue_name=offers_test&redeliver_timeout=900'
