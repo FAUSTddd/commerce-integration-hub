@@ -25,6 +25,7 @@ class ImportIntegrationTest extends KernelTestCase
     private ?MessageBusInterface $messageBus = null;
     private ?ProductRepository $productRepository = null;
     private ?ProductVariantRepository $variantRepository = null;
+    private const OFFERS_QUEUE = 'offers_test';
 
     protected function setUp(): void
     {
@@ -67,6 +68,10 @@ class ImportIntegrationTest extends KernelTestCase
 
     protected function tearDown(): void
     {
+        if ($this->entityManager !== null) {
+            $this->entityManager->getConnection()->executeStatement('DELETE FROM messenger_messages');
+            $this->entityManager->getConnection()->executeStatement('DELETE FROM import_runs');
+        }
         parent::tearDown();
         $this->entityManager?->close();
         $this->entityManager = null;
@@ -215,7 +220,7 @@ class ImportIntegrationTest extends KernelTestCase
 
         // Проверяем, что оффер не был молча пропущен, а остался в очереди (отложен через retry/delay)
         $msgCount = (int) $this->entityManager->getConnection()
-            ->fetchOne("SELECT COUNT(*) FROM messenger_messages WHERE queue_name = 'offers'");
+            ->fetchOne("SELECT COUNT(*) FROM messenger_messages WHERE queue_name = :queue", ['queue' => self::OFFERS_QUEUE]);
         $this->assertSame(1, $msgCount, 'Offer message must be postponed/requeued when catalog import is active');
 
         // Проверяем, что варианты пока не созданы
@@ -241,7 +246,7 @@ class ImportIntegrationTest extends KernelTestCase
         // 4. Сообщение не должно зацикливаться: в очереди offers сообщений не осталось,
         // так как офферы на отсутствующие товары безопасно пропущены с warning
         $msgCount = (int) $this->entityManager->getConnection()
-            ->fetchOne("SELECT COUNT(*) FROM messenger_messages WHERE queue_name = 'offers'");
+            ->fetchOne("SELECT COUNT(*) FROM messenger_messages WHERE queue_name = :queue", ['queue' => self::OFFERS_QUEUE]);
         $this->assertSame(0, $msgCount, 'Offers must be acknowledged and not loop when no catalog import is active');
     }
 
@@ -364,7 +369,7 @@ XML;
 
         // Сообщение должно быть в очереди offers (retry/delay)
         $msgCount = (int) $this->entityManager->getConnection()
-            ->fetchOne("SELECT COUNT(*) FROM messenger_messages WHERE queue_name = 'offers'");
+            ->fetchOne("SELECT COUNT(*) FROM messenger_messages WHERE queue_name = :queue", ['queue' => self::OFFERS_QUEUE]);
         $this->assertSame(1, $msgCount);
 
         // 4. Завершаем каталог и создаем недостающие товары
@@ -382,9 +387,15 @@ XML;
         $catalogRun->setStatus(\App\Entity\ImportRun::STATUS_SUCCESS);
         $this->entityManager->flush();
 
-        // Сбрасываем задержку сообщения в messenger_messages, чтобы воркер забрал его немедленно
+        // Сбрасываем задержку сообщения в messenger_messages и retry_scheduled_at в import_runs,
+        // чтобы воркер забрал его немедленно и CAS2 прошёл условие (retry_scheduled_at <= NOW())
         $this->entityManager->getConnection()->executeStatement(
-            "UPDATE messenger_messages SET available_at = NOW() - INTERVAL '1 minute' WHERE queue_name = 'offers'"
+            "UPDATE messenger_messages SET available_at = NOW() - INTERVAL '1 minute' WHERE queue_name = :queue",
+            ['queue' => self::OFFERS_QUEUE]
+        );
+        $this->entityManager->getConnection()->executeStatement(
+            "UPDATE import_runs SET retry_scheduled_at = NOW() - INTERVAL '1 minute' WHERE id = :id",
+            ['id' => $offersRun->getId()]
         );
 
         // 5. Повторный запуск воркера офферов: теперь товар существует и каталог завершен
@@ -393,7 +404,7 @@ XML;
         $this->entityManager->clear();
         // В очереди сообщений не осталось
         $remainingMsgs = (int) $this->entityManager->getConnection()
-            ->fetchOne("SELECT COUNT(*) FROM messenger_messages WHERE queue_name = 'offers'");
+            ->fetchOne("SELECT COUNT(*) FROM messenger_messages WHERE queue_name = :queue", ['queue' => self::OFFERS_QUEUE]);
         $this->assertSame(0, $remainingMsgs);
 
         // Варианты и цены успешно созданы
@@ -479,7 +490,7 @@ XML;
 
             // Проверяем, что сообщение действительно находится в очереди offers на retry
             $msgCount = (int) $this->entityManager->getConnection()
-                ->fetchOne("SELECT COUNT(*) FROM messenger_messages WHERE queue_name = 'offers'");
+                ->fetchOne("SELECT COUNT(*) FROM messenger_messages WHERE queue_name = :queue", ['queue' => self::OFFERS_QUEUE]);
             $this->assertSame(1, $msgCount, 'Message must remain in queue for retry');
         } finally {
             @unlink($tmpFile);
