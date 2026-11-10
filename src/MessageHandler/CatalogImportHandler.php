@@ -91,9 +91,8 @@ final class CatalogImportHandler extends CatalogImporter
                 return;
             }
 
-            $run->setStatus(ImportRun::STATUS_PROCESSING);
-            $run->setStartedAt(new \DateTimeImmutable());
-            $this->importRunRepository->save($run);
+            // Sync with DB after CAS2 without overwriting it via Doctrine save
+            $this->entityManager->refresh($run);
 
             $this->importRunContext->setCurrentFencingToken($this->currentFencingToken);
             $this->importRunContext->setCurrentAttempt($run->getAttempt());

@@ -45,13 +45,22 @@ final class CatalogImportHandlerRunBindingTest extends TestCase
         $runRepo->method('tryAcquireSessionAdvisoryLock')->willReturn(true);
         $runRepo->method('claimRunCas2')->willReturn(true);
 
-        // findLatestPendingOrProcessing must NEVER be called
+        // findLatestPendingOrProcessing and save must NEVER be called
         $runRepo->expects($this->never())
             ->method('findLatestPendingOrProcessing');
+        $runRepo->expects($this->never())
+            ->method('save');
 
-        $runRepo->expects($this->once())
-            ->method('save')
-            ->with($run);
+        // Emulate EntityManager::refresh updating entity state from DB after claimRunCas2
+        $em->expects($this->once())
+            ->method('refresh')
+            ->with($run)
+            ->willReturnCallback(static function (ImportRun $targetRun): void {
+                $targetRun->setStatus(ImportRun::STATUS_PROCESSING);
+                $targetRun->setStartedAt(new \DateTimeImmutable());
+                $targetRun->setAttempt(1);
+                $targetRun->setFencingToken('b1c2d3e4-0000-4000-8000-112233445566');
+            });
 
         $context = new ImportRunContext();
         $context->setCurrentRunId(888);
@@ -60,6 +69,8 @@ final class CatalogImportHandlerRunBindingTest extends TestCase
         $handler->__invoke(new ImportCatalogCommand($this->fixturePath));
 
         $this->assertSame(ImportRun::STATUS_PROCESSING, $run->getStatus());
+        $this->assertSame(1, $run->getAttempt());
+        $this->assertSame('b1c2d3e4-0000-4000-8000-112233445566', $run->getFencingToken());
         $this->assertNotNull($run->getStartedAt());
     }
 

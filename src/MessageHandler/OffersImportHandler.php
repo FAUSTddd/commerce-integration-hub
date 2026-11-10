@@ -90,16 +90,13 @@ final class OffersImportHandler extends OffersImporter
             // CAS2 claim
             $claimed = $this->importRunRepository->claimRunCas2($this->currentRunId, $this->currentFencingToken);
             if (!$claimed) {
-                if ($run->getStatus() !== ImportRun::STATUS_PROCESSING) {
-                    $this->importRunRepository->releaseSessionAdvisoryLock($this->currentRunId);
-                    $this->importRunContext->setAdvisoryLockHeld(false);
-                    return;
-                }
+                $this->importRunRepository->releaseSessionAdvisoryLock($this->currentRunId);
+                $this->importRunContext->setAdvisoryLockHeld(false);
+                return;
             }
 
-            $run->setStatus(ImportRun::STATUS_PROCESSING);
-            $run->setStartedAt(new \DateTimeImmutable());
-            $this->importRunRepository->save($run);
+            // Sync with DB after CAS2 without overwriting it via Doctrine save
+            $this->entityManager->refresh($run);
 
             $this->importRunContext->setCurrentFencingToken($this->currentFencingToken);
             $this->importRunContext->setCurrentAttempt($run->getAttempt());
