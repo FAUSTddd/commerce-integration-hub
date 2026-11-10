@@ -6,6 +6,7 @@ namespace App\Repository;
 
 use App\Entity\ImportRun;
 use Doctrine\Bundle\DoctrineBundle\Repository\ServiceEntityRepository;
+use Doctrine\DBAL\Types\Types;
 use Doctrine\Persistence\ManagerRegistry;
 
 /**
@@ -225,11 +226,18 @@ class ImportRunRepository extends ServiceEntityRepository
 
     /**
      * CAS4A: Transitions an ImportRun into retry waiting state.
-     * Clears fencing_token, sets retry_scheduled_at to the given delay in seconds.
+     * Clears fencing_token, sets retry_scheduled_at to the exact available_at of the retry message
+     * in messenger_messages (AT TIME ZONE 'UTC').
+     *
+     * Preconditions:
+     * - Status must be 'PROCESSING'
+     * - Attempt must match expectedAttempt
+     * - Fencing token must match expectedToken
+     * - The retry message must exist in messenger_messages with a non-null available_at.
      */
     public function markRunForRetryCas4A(
         int $runId,
-        int $delaySeconds,
+        int|string $messengerMessageId,
         int $expectedAttempt,
         ?string $expectedToken
     ): bool {
@@ -238,20 +246,36 @@ class ImportRunRepository extends ServiceEntityRepository
         $sql = <<<SQL
             UPDATE import_runs
             SET fencing_token = NULL,
-                retry_scheduled_at = NOW() + make_interval(secs => :delaySec),
+                retry_scheduled_at = (
+                    SELECT available_at AT TIME ZONE 'UTC'
+                    FROM messenger_messages
+                    WHERE id = :msgId
+                ),
                 has_deferred_retry = FALSE
             WHERE id = :id
               AND status = 'PROCESSING'
               AND attempt = :expectedAttempt
               AND fencing_token IS NOT DISTINCT FROM (:expectedToken)::uuid
+              AND EXISTS (
+                  SELECT 1 FROM messenger_messages WHERE id = :msgId AND available_at IS NOT NULL
+              )
         SQL;
 
-        $rows = $conn->executeStatement($sql, [
-            'id' => $runId,
-            'delaySec' => $delaySeconds,
-            'expectedAttempt' => $expectedAttempt,
-            'expectedToken' => $expectedToken,
-        ]);
+        $rows = $conn->executeStatement(
+            $sql,
+            [
+                'id' => $runId,
+                'msgId' => (int) $messengerMessageId,
+                'expectedAttempt' => $expectedAttempt,
+                'expectedToken' => $expectedToken,
+            ],
+            [
+                'id' => Types::BIGINT,
+                'msgId' => Types::BIGINT,
+                'expectedAttempt' => Types::INTEGER,
+                'expectedToken' => Types::STRING,
+            ]
+        );
 
         return $rows === 1;
     }

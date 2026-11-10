@@ -17,10 +17,11 @@ use Symfony\Component\Messenger\Event\SendMessageToTransportsEvent;
 use Symfony\Component\Messenger\Event\WorkerMessageFailedEvent;
 use Symfony\Component\Messenger\Event\WorkerMessageHandledEvent;
 use Symfony\Component\Messenger\Event\WorkerMessageReceivedEvent;
-
+use Symfony\Component\Messenger\Event\WorkerMessageRetriedEvent;
 use Symfony\Component\Messenger\Event\WorkerRunningEvent;
 use Symfony\Component\Messenger\Stamp\DelayStamp;
 use Symfony\Component\Messenger\Stamp\RedeliveryStamp;
+use Symfony\Component\Messenger\Stamp\TransportMessageIdStamp;
 
 /**
  * Manages ImportRun persistence and its binding to Messenger Envelopes across transports and retries.
@@ -41,6 +42,7 @@ final class MessengerDispatchSubscriber implements EventSubscriberInterface
             WorkerMessageReceivedEvent::class => 'onWorkerMessageReceived',
             WorkerMessageHandledEvent::class => 'onWorkerMessageHandled',
             WorkerMessageFailedEvent::class => ['onWorkerMessageFailed', 50],
+            WorkerMessageRetriedEvent::class => 'onWorkerMessageRetried',
             WorkerRunningEvent::class => 'onWorkerRunning',
         ];
     }
@@ -51,6 +53,21 @@ final class MessengerDispatchSubscriber implements EventSubscriberInterface
 
     public function onWorkerMessageReceived(WorkerMessageReceivedEvent $event): void
     {
+        // Defensive cleanup: release lingering advisory lock before resetting context
+        if ($this->importRunContext->isAdvisoryLockHeld() && $this->importRunContext->getCurrentRunId() !== null) {
+            try {
+                $released = $this->importRunRepository->releaseSessionAdvisoryLock($this->importRunContext->getCurrentRunId());
+                if (!$released) {
+                    $this->logger?->warning('Lingering advisory lock release returned false on new message', [
+                        'run_id' => $this->importRunContext->getCurrentRunId(),
+                    ]);
+                }
+            } catch (\Throwable $e) {
+                $this->logger?->warning('Failed to release lingering advisory lock on new message', ['error' => $e->getMessage()]);
+            }
+        }
+        $this->importRunContext->reset();
+
         $stamp = $event->getEnvelope()->last(ImportRunStamp::class);
         $this->importRunContext->setCurrentRunId($stamp?->getImportRunId());
 
@@ -67,62 +84,98 @@ final class MessengerDispatchSubscriber implements EventSubscriberInterface
 
     public function onWorkerMessageHandled(WorkerMessageHandledEvent $event): void
     {
-        // NOTE: Handled event fires BEFORE Worker::ack().
-        // Mark that handler succeeded so onWorkerRunning knows to mark outbox as acked
-        $this->importRunContext->setHandledSuccessfully(true);
+        $outboxId = $this->importRunContext->getCurrentOutboxId();
+        $runId = $this->importRunContext->getCurrentRunId();
+        $attempt = $this->importRunContext->getCurrentAttempt();
 
-        if (!$this->importRunContext->isAdvisoryLockHeld()) {
-            $this->importRunContext->reset();
+        if ($outboxId !== null) {
+            // Primary path: exact ACK by Outbox primary key
+            $this->importRunRepository->markOutboxAckedById($outboxId);
+        } elseif ($runId !== null && $attempt !== null) {
+            // Isolated legacy fallback: for inflight messages published without OutboxMessageStamp
+            $this->importRunRepository->markOutboxAcked($runId, $attempt);
         }
+
+        // NOTE: Handled event fires BEFORE Worker::ack().
+        // Mark that handler succeeded so context reflects success
+        $this->importRunContext->setHandledSuccessfully(true);
     }
 
-    public function onWorkerMessageFailed(WorkerMessageFailedEvent $event): void
+    public function onWorkerMessageRetried(WorkerMessageRetriedEvent $event): void
     {
-        $stamp = $event->getEnvelope()->last(ImportRunStamp::class);
-        $runId = $stamp?->getImportRunId() ?? $this->importRunContext->getCurrentRunId();
-
-        if ($runId === null) {
-            $this->importRunContext->reset();
-            return;
-        }
-
-        $attempt = $this->importRunContext->getCurrentAttempt() ?? 1;
+        $runId = $this->importRunContext->getCurrentRunId();
+        $attempt = $this->importRunContext->getCurrentAttempt();
         $token = $this->importRunContext->getCurrentFencingToken();
 
-        if ($event->willRetry()) {
-            // CAS4A: Calculate delay seconds
+        if ($runId !== null && $attempt !== null && $token !== null) {
             $envelope = $event->getEnvelope();
-            $delayStamp = $envelope->last(DelayStamp::class);
-            $delaySeconds = $delayStamp !== null ? (int) ceil($delayStamp->getDelay() / 1000) : 5;
+            $transportMessageId = $envelope->last(TransportMessageIdStamp::class)?->getId();
 
-            // Mark for retry
+            if ($transportMessageId === null) {
+                $this->logger?->critical('CAS4A retry transition skipped: TransportMessageIdStamp missing from retried envelope', [
+                    'run_id' => $runId,
+                    'expected_attempt' => $attempt,
+                    'receiver_name' => $event->getReceiverName(),
+                ]);
+                return;
+            }
+
             $updated = $this->importRunRepository->markRunForRetryCas4A(
                 $runId,
-                $delaySeconds,
+                $transportMessageId,
                 $attempt,
                 $token
             );
 
             if (!$updated) {
-                $this->logger?->critical('CAS4A retry transition precondition failed: ImportRun state altered concurrently', [
+                $this->logger?->critical('CAS4A retry transition precondition failed: ImportRun state altered concurrently or message missing', [
                     'run_id' => $runId,
+                    'messenger_message_id' => $transportMessageId,
                     'expected_attempt' => $attempt,
                     'fencing_token' => $token,
                     'receiver_name' => $event->getReceiverName(),
                 ]);
             }
         } else {
-            // CAS4B: Retries exhausted or non-retryable
-            $exception = $event->getThrowable();
-            $errorMsg = $exception->getMessage();
-            if ($exception->getPrevious() !== null) {
-                $errorMsg .= ' (Previous: ' . $exception->getPrevious()->getMessage() . ')';
-            }
-            $this->importRunRepository->markRunExhaustedFailedCas4B($runId, $errorMsg, $attempt, $token);
+            $this->logger?->warning('Skipping CAS4A retry transition: context incomplete', [
+                'run_id' => $runId,
+                'attempt' => $attempt,
+                'fencing_token' => $token,
+                'receiver_name' => $event->getReceiverName(),
+            ]);
+        }
+    }
+
+    public function onWorkerMessageFailed(WorkerMessageFailedEvent $event): void
+    {
+        if ($event->willRetry()) {
+            return;
         }
 
-        if (!$this->importRunContext->isAdvisoryLockHeld()) {
-            $this->importRunContext->reset();
+        $runId = $event->getEnvelope()->last(ImportRunStamp::class)?->getImportRunId() ?? $this->importRunContext->getCurrentRunId();
+        $attempt = $this->importRunContext->getCurrentAttempt();
+        $token = $this->importRunContext->getCurrentFencingToken();
+
+        if ($runId === null) {
+            return;
+        }
+
+        // CAS4B: Retries exhausted or non-retryable
+        $exception = $event->getThrowable();
+        $errorMsg = $exception->getMessage();
+        if ($exception->getPrevious() !== null) {
+            $errorMsg .= ' (Previous: ' . $exception->getPrevious()->getMessage() . ')';
+        }
+
+        if ($attempt !== null && $token !== null) {
+            $this->importRunRepository->markRunExhaustedFailedCas4B($runId, $errorMsg, $attempt, $token);
+        } else {
+            $this->logger?->warning('Skipping CAS4B exhausted failure transition: attempt or fencing token not confirmed', [
+                'run_id' => $runId,
+                'attempt' => $attempt,
+                'fencing_token' => $token,
+                'receiver_name' => $event->getReceiverName(),
+            ]);
         }
     }
 
@@ -130,26 +183,20 @@ final class MessengerDispatchSubscriber implements EventSubscriberInterface
     {
         // Fires strictly AFTER Worker::ack() or Worker::reject()
         $runId = $this->importRunContext->getCurrentRunId();
-        $outboxId = $this->importRunContext->getCurrentOutboxId();
-        $attempt = $this->importRunContext->getCurrentAttempt();
 
-        // If message was handled and ACKed successfully, mark outbox entry as acked
-        if ($this->importRunContext->isHandledSuccessfully()) {
-            if ($outboxId !== null) {
-                // Primary path: exact ACK by Outbox primary key
-                $this->importRunRepository->markOutboxAckedById($outboxId);
-            } elseif ($runId !== null && $attempt !== null) {
-                // Isolated legacy fallback: for inflight messages published without OutboxMessageStamp
-                $this->importRunRepository->markOutboxAcked($runId, $attempt);
+        try {
+            if ($runId !== null && $this->importRunContext->isAdvisoryLockHeld()) {
+                $released = $this->importRunRepository->releaseSessionAdvisoryLock($runId);
+                if (!$released) {
+                    $this->logger?->warning('Session advisory lock release returned false in onWorkerRunning', [
+                        'run_id' => $runId,
+                    ]);
+                }
             }
+        } finally {
+            // Reset execution guard and context for next queue iteration
+            $this->guardState?->reset();
+            $this->importRunContext->reset();
         }
-
-        if ($runId !== null && $this->importRunContext->isAdvisoryLockHeld()) {
-            $this->importRunRepository->releaseSessionAdvisoryLock($runId);
-        }
-
-        // Reset execution guard and context for next queue iteration
-        $this->guardState?->reset();
-        $this->importRunContext->reset();
     }
 }

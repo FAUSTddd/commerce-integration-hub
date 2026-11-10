@@ -19,11 +19,16 @@ use Symfony\Bundle\FrameworkBundle\Test\KernelTestCase;
 use Symfony\Component\Console\Input\ArrayInput;
 use Symfony\Component\Console\Output\BufferedOutput;
 use Symfony\Component\Messenger\Envelope;
+use Symfony\Component\Messenger\Event\WorkerMessageRetriedEvent;
 use Symfony\Component\Messenger\MessageBusInterface;
+use Symfony\Component\Messenger\Stamp\RedeliveryStamp;
+use Symfony\Component\Messenger\Stamp\SentToFailureTransportStamp;
 use Symfony\Component\Messenger\Transport\Serialization\SerializerInterface;
 
 final class OffersRetryLifecycleIntegrationTest extends KernelTestCase
 {
+    private const TEST_OFFERS_QUEUE = 'offers_test';
+    private const TEST_FAILED_QUEUE = 'failed';
     private ?EntityManagerInterface $entityManager = null;
     private ?MessageBusInterface $messageBus = null;
     private ?ImportRunRepository $runRepo = null;
@@ -85,7 +90,9 @@ final class OffersRetryLifecycleIntegrationTest extends KernelTestCase
         ];
 
         $rawInitialIds = $this->entityManager->getConnection()->fetchFirstColumn(
-            "SELECT id FROM messenger_messages WHERE queue_name IN ('offers', 'failed')"
+            'SELECT id FROM messenger_messages WHERE queue_name IN (:queues)',
+            ['queues' => [self::TEST_OFFERS_QUEUE, self::TEST_FAILED_QUEUE]],
+            ['queues' => ArrayParameterType::STRING]
         );
         $this->initialQueueMessageIds = array_map('intval', $rawInitialIds);
 
@@ -139,7 +146,9 @@ final class OffersRetryLifecycleIntegrationTest extends KernelTestCase
             // 2. Classify messenger messages unconditionally; collect delete IDs and anomalies
             $messageIdsToDelete = [];
             $rows = $conn->fetchAllAssociative(
-                "SELECT id, body, headers FROM messenger_messages WHERE queue_name IN ('offers', 'failed')"
+                'SELECT id, body, headers FROM messenger_messages WHERE queue_name IN (:queues)',
+                ['queues' => [self::TEST_OFFERS_QUEUE, self::TEST_FAILED_QUEUE]],
+                ['queues' => ArrayParameterType::STRING]
             );
 
             foreach ($rows as $row) {
@@ -301,93 +310,159 @@ final class OffersRetryLifecycleIntegrationTest extends KernelTestCase
         $this->assertNotNull($run);
         $this->assertSame(ImportRun::STATUS_PENDING, $run->getStatus());
 
-        $initialMessages = $this->findQueueMessagesForRun($conn, 'offers', $failingRunId);
+        $initialMessages = $this->findQueueMessagesForRun($conn, self::TEST_OFFERS_QUEUE, $failingRunId);
         $this->assertCount(1, $initialMessages, 'Exactly 1 message for this runId must be in offers queue');
 
         $delays = [];
         $attemptTimestamps = [];
+        $retriedEvents = [];
 
-        // 2. Perform retries with live backoff delays:
-        // Total attempts until failure: 1 initial attempt + 3 retries = 4 executions.
-        // During attempts 1, 2, 3: message fails and gets scheduled for redelivery with delay.
-        // On attempt 4: retries are exhausted (max_retries: 3), message goes to failed queue and ImportRun becomes FAILED.
-        for ($execution = 1; $execution <= 4; ++$execution) {
-            $tExec = new \DateTimeImmutable();
-            $output = new BufferedOutput();
-            $input = new ArrayInput([
-                'command' => 'messenger:consume',
-                'receivers' => ['async_offers'],
-                '--limit' => 1,
-                '--time-limit' => 5,
-                '--no-interaction' => true,
-            ]);
+        $eventDispatcher = static::getContainer()->get('event_dispatcher');
+        $retriedListener = static function (WorkerMessageRetriedEvent $e) use (&$retriedEvents, $failingRunId): void {
+            $rStamp = $e->getEnvelope()->last(ImportRunStamp::class);
+            if ($rStamp !== null && $rStamp->getImportRunId() === $failingRunId) {
+                $retriedEvents[] = $e;
+            }
+        };
+        $eventDispatcher->addListener(WorkerMessageRetriedEvent::class, $retriedListener);
 
-            $this->application->run($input, $output);
-            $this->entityManager->clear();
-            $currentRun = $this->runRepo->find($failingRunId);
-            $this->assertNotNull($currentRun);
+        try {
+            // 2. Perform retries with live backoff delays:
+            // Total attempts until failure: 1 initial attempt + 3 retries = 4 executions.
+            // During attempts 1, 2, 3: message fails and gets scheduled for redelivery with delay.
+            // On attempt 4: retries are exhausted (max_retries: 3), message goes to failed queue and ImportRun becomes FAILED.
+            for ($execution = 1; $execution <= 4; ++$execution) {
+                $tExec = new \DateTimeImmutable();
+                $output = new BufferedOutput();
+                $input = new ArrayInput([
+                    'command' => 'messenger:consume',
+                    'receivers' => ['async_offers'],
+                    '--limit' => 1,
+                    '--time-limit' => 10,
+                    '--no-interaction' => true,
+                ]);
 
-            // ImportRunContext must be reset after every attempt
-            $this->assertNull($this->context->getCurrentRunId(), "Context must be reset after execution {$execution}");
+                $this->application->run($input, $output);
 
-            if ($execution < 4) {
-                // While retries are not exhausted:
-                // Run is in PROCESSING, finished_at is null
-                $this->assertSame(
-                    ImportRun::STATUS_PROCESSING,
-                    $currentRun->getStatus(),
-                    "ImportRun must remain PROCESSING during retry cycle on execution {$execution}"
+                $this->entityManager->clear();
+                $currentRun = $this->runRepo->find($failingRunId);
+                $this->assertNotNull($currentRun);
+
+                // ImportRunContext must be reset after every attempt
+                $this->assertFalse(
+                    $this->context->isAdvisoryLockHeld(),
+                    "Advisory lock must be released after execution {$execution}"
                 );
                 $this->assertNull(
-                    $currentRun->getFinishedAt(),
-                    "finished_at must be null while retries are in progress on execution {$execution}"
+                    $this->context->getCurrentRunId(),
+                    "Context runId must be reset after execution {$execution}"
                 );
 
-                // Publish outbox message if available
-                $this->publisher->publishAvailableMessages(10, $failingRunId);
+                if ($execution <= 3) {
+                    $this->assertSame(
+                        ImportRun::STATUS_PROCESSING,
+                        $currentRun->getStatus(),
+                        "ImportRun must remain PROCESSING during retry cycle on execution {$execution}"
+                    );
+                    $this->assertNull(
+                        $currentRun->getFinishedAt(),
+                        "finished_at must be null while retries are in progress on execution {$execution}"
+                    );
 
-                // Message must be scheduled in offers queue with a future available_at for this specific runId
-                $offersForRun = $this->findQueueMessagesForRun($conn, 'offers', $failingRunId);
-                $this->assertNotEmpty($offersForRun, "Message must remain in offers queue during retry cycle on execution {$execution}");
-                $targetMessage = $offersForRun[0];
+                    // Wait for redelivered message to appear in test queue
+                    $deadline = microtime(true) + 5.0;
+                    $offersForRun = [];
+                    do {
+                        $offersForRun = $this->findQueueMessagesForRun($conn, self::TEST_OFFERS_QUEUE, $failingRunId);
+                        if (!empty($offersForRun)) {
+                            break;
+                        }
+                        usleep(50000); // 50ms
+                    } while (microtime(true) < $deadline);
 
-                $availableAt = new \DateTimeImmutable((string) $targetMessage['available_at']);
-                $delaySec = max(0, $availableAt->getTimestamp() - $tExec->getTimestamp());
-                $delays[] = $delaySec;
-                $attemptTimestamps[] = [
-                    'execution' => $execution,
-                    'executed_at' => $tExec->format('H:i:s'),
-                    'scheduled_for' => $availableAt->format('H:i:s'),
-                    'delay_seconds' => $delaySec,
-                ];
+                    $this->assertNotEmpty($offersForRun, "Message must remain in offers queue during retry cycle on execution {$execution}");
+                    $this->assertCount(1, $offersForRun, "Exactly 1 message must exist in offers queue for runId {$failingRunId} on execution {$execution}");
+                    $targetMessage = $offersForRun[0];
 
-                // Sleep until message is available for consumption
-                $remainingSleep = max(0, $availableAt->getTimestamp() - time()) + 1;
-                sleep($remainingSleep);
-            } else {
-                // Execution 4: retries exhausted -> terminal FAILED
-                $this->assertSame(
-                    ImportRun::STATUS_FAILED,
-                    $currentRun->getStatus(),
-                    'ImportRun must be FAILED after 3 retries are exhausted'
-                );
-                $this->assertNotNull($currentRun->getFinishedAt());
-                $this->assertNotNull($currentRun->getErrorMessage());
-                $this->assertStringContainsString('Offers import failed for file', $currentRun->getErrorMessage());
+                    $retryStamp = $targetMessage['envelope']->last(RedeliveryStamp::class);
+                    $this->assertNotNull($retryStamp, "RedeliveryStamp must be attached on execution {$execution}");
+                    $this->assertSame($execution, $retryStamp->getRetryCount(), "retryCount must match execution iteration {$execution}");
+                    $this->assertCount($execution, $retriedEvents, "WorkerMessageRetriedEvent must fire once per retry iteration {$execution}");
 
-                $attemptTimestamps[] = [
-                    'execution' => 4,
-                    'executed_at' => $tExec->format('H:i:s'),
-                    'result' => 'TRANSFERRED_TO_FAILED',
-                ];
+                    $availableAt = new \DateTimeImmutable((string) $targetMessage['available_at']);
+                    $this->assertNotNull($currentRun->getRetryScheduledAt(), "retry_scheduled_at must be populated on execution {$execution}");
+                    $this->assertSame(
+                        $availableAt->format('Y-m-d H:i:s'),
+                        $currentRun->getRetryScheduledAt()->format('Y-m-d H:i:s'),
+                        "import_runs.retry_scheduled_at must exactly equal messenger_messages.available_at on execution {$execution}"
+                    );
+                    $delaySec = max(0, $availableAt->getTimestamp() - $tExec->getTimestamp());
+                    $delays[] = $delaySec;
+                    $attemptTimestamps[] = [
+                        'execution' => $execution,
+                        'executed_at' => $tExec->format('H:i:s'),
+                        'scheduled_for' => $availableAt->format('H:i:s'),
+                        'delay_seconds' => $delaySec,
+                    ];
+
+                    // Poll PostgreSQL directly until message is available for consumption:
+                    // messenger_messages.available_at <= NOW() AND import_runs.retry_scheduled_at <= NOW()
+                    // along with status='PROCESSING', expected attempt, and queue_name='offers_test'.
+                    $pollDeadline = microtime(true) + 15.0;
+                    $isAvailable = false;
+                    while (microtime(true) < $pollDeadline) {
+                        $ready = (bool) $conn->fetchOne(
+                            'SELECT 1
+                             FROM messenger_messages m
+                             JOIN import_runs r ON r.id = :runId
+                             WHERE m.id = :msgId
+                               AND m.queue_name = :queue
+                               AND m.available_at <= NOW()
+                               AND r.status = :status
+                               AND r.attempt = :attempt
+                               AND r.retry_scheduled_at <= NOW()',
+                            [
+                                'msgId' => $targetMessage['id'],
+                                'queue' => self::TEST_OFFERS_QUEUE,
+                                'runId' => $failingRunId,
+                                'status' => ImportRun::STATUS_PROCESSING,
+                                'attempt' => $execution,
+                            ]
+                        );
+                        if ($ready) {
+                            $isAvailable = true;
+                            break;
+                        }
+                        usleep(50000); // 50ms interval
+                    }
+                    $this->assertTrue($isAvailable, "Message available_at / retry_scheduled_at reached timeout in PostgreSQL on execution {$execution}");
+                } else {
+                    // Execution 4: retries exhausted -> terminal FAILED
+                    $this->assertSame(
+                        ImportRun::STATUS_FAILED,
+                        $currentRun->getStatus(),
+                        'ImportRun must be FAILED after 3 retries are exhausted'
+                    );
+                    $this->assertNotNull($currentRun->getFinishedAt());
+                    $this->assertNotNull($currentRun->getErrorMessage());
+                    $this->assertStringContainsString('Offers import failed for file', $currentRun->getErrorMessage());
+
+                    $attemptTimestamps[] = [
+                        'execution' => 4,
+                        'executed_at' => $tExec->format('H:i:s'),
+                        'result' => 'TRANSFERRED_TO_FAILED',
+                    ];
+                }
             }
+        } finally {
+            $eventDispatcher->removeListener(WorkerMessageRetriedEvent::class, $retriedListener);
         }
 
         // 3. Verify queues after exhaustion for this specific runId
-        $offersRemaining = $this->findQueueMessagesForRun($conn, 'offers', $failingRunId);
+        $offersRemaining = $this->findQueueMessagesForRun($conn, self::TEST_OFFERS_QUEUE, $failingRunId);
         $this->assertCount(0, $offersRemaining, 'Offers queue must have no messages for failingRunId after retries exhausted');
 
-        $failedMessages = $this->findQueueMessagesForRun($conn, 'failed', $failingRunId);
+        $failedMessages = $this->findQueueMessagesForRun($conn, self::TEST_FAILED_QUEUE, $failingRunId);
         $this->assertCount(1, $failedMessages, 'Message must be moved to failed queue for failingRunId');
         $failedEnvelope = $failedMessages[0]['envelope'];
         $failedStamp = $failedEnvelope->last(ImportRunStamp::class);
