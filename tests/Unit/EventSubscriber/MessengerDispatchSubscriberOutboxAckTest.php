@@ -11,13 +11,14 @@ use App\Messenger\OutboxMessageStamp;
 use App\Repository\ImportRunRepository;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Messenger\Envelope;
+use Symfony\Component\Messenger\Event\WorkerMessageHandledEvent;
 use Symfony\Component\Messenger\Event\WorkerMessageReceivedEvent;
 use Symfony\Component\Messenger\Event\WorkerRunningEvent;
 use Symfony\Component\Messenger\Worker;
 
 final class MessengerDispatchSubscriberOutboxAckTest extends TestCase
 {
-    public function testOnWorkerRunningAcksByOutboxIdWhenStampIsPresent(): void
+    public function testOnWorkerMessageHandledAcksByOutboxIdWhenStampIsPresent(): void
     {
         $context = new ImportRunContext();
         $repository = $this->createMock(ImportRunRepository::class);
@@ -37,14 +38,20 @@ final class MessengerDispatchSubscriberOutboxAckTest extends TestCase
         $this->assertSame(10, $context->getCurrentRunId());
         $this->assertSame(42, $context->getCurrentOutboxId());
 
-        $context->setHandledSuccessfully(true);
-
         $repository->expects($this->once())
             ->method('markOutboxAckedById')
             ->with(42);
 
         $repository->expects($this->never())
             ->method('markOutboxAcked');
+
+        $handledEvent = new WorkerMessageHandledEvent($envelope, 'offers');
+        $subscriber->onWorkerMessageHandled($handledEvent);
+
+        // Before onWorkerRunning, context preserves state and marks execution as successful
+        $this->assertSame(10, $context->getCurrentRunId());
+        $this->assertSame(42, $context->getCurrentOutboxId());
+        $this->assertTrue($context->isHandledSuccessfully());
 
         $worker = $this->createMock(Worker::class);
         $runningEvent = new WorkerRunningEvent($worker, false);
@@ -56,7 +63,7 @@ final class MessengerDispatchSubscriberOutboxAckTest extends TestCase
         $this->assertFalse($context->isHandledSuccessfully());
     }
 
-    public function testOnWorkerRunningUsesLegacyFallbackWhenOutboxStampIsMissing(): void
+    public function testOnWorkerMessageHandledUsesLegacyFallbackWhenOutboxStampIsMissing(): void
     {
         $context = new ImportRunContext();
         $repository = $this->createMock(ImportRunRepository::class);
@@ -76,7 +83,6 @@ final class MessengerDispatchSubscriberOutboxAckTest extends TestCase
         $this->assertNull($context->getCurrentOutboxId());
 
         $context->setCurrentAttempt(1);
-        $context->setHandledSuccessfully(true);
 
         $repository->expects($this->never())
             ->method('markOutboxAckedById');
@@ -84,6 +90,15 @@ final class MessengerDispatchSubscriberOutboxAckTest extends TestCase
         $repository->expects($this->once())
             ->method('markOutboxAcked')
             ->with(10, 1);
+
+        $handledEvent = new WorkerMessageHandledEvent($envelope, 'offers');
+        $subscriber->onWorkerMessageHandled($handledEvent);
+
+        // Before onWorkerRunning, context preserves state and marks execution as successful
+        $this->assertSame(10, $context->getCurrentRunId());
+        $this->assertNull($context->getCurrentOutboxId());
+        $this->assertSame(1, $context->getCurrentAttempt());
+        $this->assertTrue($context->isHandledSuccessfully());
 
         $worker = $this->createMock(Worker::class);
         $runningEvent = new WorkerRunningEvent($worker, false);
@@ -138,5 +153,38 @@ final class MessengerDispatchSubscriberOutboxAckTest extends TestCase
         $this->assertNotNull($retriedEnvelope->last(OutboxMessageStamp::class));
         $this->assertSame(42, $retriedEnvelope->last(OutboxMessageStamp::class)->getOutboxId());
         $this->assertSame(1, $retriedEnvelope->last(\Symfony\Component\Messenger\Stamp\RedeliveryStamp::class)->getRetryCount());
+    }
+
+    public function testExceptionInMarkOutboxAckedByIdBubblesUpAndPreventsHandledSuccessfully(): void
+    {
+        $context = new ImportRunContext();
+        $repository = $this->createMock(ImportRunRepository::class);
+
+        $subscriber = new MessengerDispatchSubscriber(
+            importRunContext: $context,
+            importRunRepository: $repository
+        );
+
+        $envelope = (new Envelope(new \stdClass()))
+            ->with(new ImportRunStamp(10))
+            ->with(new OutboxMessageStamp(42));
+
+        $receivedEvent = new WorkerMessageReceivedEvent($envelope, 'offers');
+        $subscriber->onWorkerMessageReceived($receivedEvent);
+
+        $repository->expects($this->once())
+            ->method('markOutboxAckedById')
+            ->with(42)
+            ->willThrowException(new \RuntimeException('DB connection lost during outbox ACK'));
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('DB connection lost during outbox ACK');
+
+        try {
+            $handledEvent = new WorkerMessageHandledEvent($envelope, 'offers');
+            $subscriber->onWorkerMessageHandled($handledEvent);
+        } finally {
+            $this->assertFalse($context->isHandledSuccessfully());
+        }
     }
 }
