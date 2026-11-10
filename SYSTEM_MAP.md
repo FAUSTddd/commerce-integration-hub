@@ -38,17 +38,27 @@
   - `async_catalog` (`doctrine://default?queue_name=catalog`): `max_retries: 0`, DLQ = `failed`.
   - `async_offers` (`doctrine://default?queue_name=offers`): `max_retries: 3`, `delay: 2000` (2s), `multiplier: 2`, `max_delay: 10000` (10s), дефолтный Symfony jitter = 0.1 (±10% к задержке), DLQ = `failed`.
 - **Управление транзакциями:** 1 XML-файл = 1 транзакция БД. Хэндлер открывает `$entityManager->beginTransaction()` перед чтением стрима, фиксирует `$entityManager->commit()` по завершении или откатывает `$entityManager->rollback()` при `Throwable`.
+- **Синхронизация Identity Map после CAS2 (Claim Run):**
+  - При захвате запуска обработчик (`CatalogImportHandler`, `OffersImportHandler`) вызывает прямой атомарный SQL `claimRunCas2`, переводящий запись в `status = PROCESSING`, инкрементирующий `attempt` и генерирующий `fencing_token`.
+  - Для устранения рассинхронизации между базой данных и UnitOfWork Doctrine вместо устаревшего `$runRepo->save($run)` выполняется `$entityManager->refresh($run)`. Это гарантирует загрузку актуальных `attempt`, `fencing_token` и `status` в память сущности без выполнения избыточных DML-запросов и без риска перезаписи состояния при последующих `flush()`.
 - **Связывание офферов:** `OffersImportHandler` парсит `external_id` (разделитель `#`). Если родительский `Product` отсутствует, но каталог еще импортируется (`hasActiveCatalogImport()`), бросает `RecoverableMessageHandlingException` для повторной обработки через ретраи Messenger.
 
-## 5. Outbox Pattern & Exact Outbox ACK
+## 5. Outbox Pattern, CAS Retry Sync & Outbox ACK
 - **Архитектурное решение Outbox:** Таблица `import_run_outbox` используется для надежной доставки отложенных и повторных сообщений (`defer` / `retry`) с защитой от дублей через частичный индекс `uniq_outbox_active_defer` на `(run_id, kind) WHERE published_at IS NULL AND acked_at IS NULL`.
+- **Синхронизация retry timestamp через CAS4A (`TransportMessageIdStamp`):**
+  - При повторной отправке сообщения подписчик `MessengerDispatchSubscriber::onWorkerMessageRetried` перехватывает событие ретрая, извлекает идентификатор созданного транспортного сообщения через `TransportMessageIdStamp` и передает его в `ImportRunRepository::markRunForRetryCas4A`.
+  - Метка `retry_scheduled_at` в `import_runs` выставляется атомарным подзапросом `(SELECT available_at AT TIME ZONE 'UTC' FROM messenger_messages WHERE id = :msgId)`. Это гарантирует строгую синхронизацию времени готовности задачи в Messenger с таймстемпом в таблице запусков, исключая race conditions и ложное сжигание попыток при преждевременном потреблении воркером.
 - **Штамп трассировки Outbox (`OutboxMessageStamp`):**
   - При публикации доступных записей `OutboxPublisher::publishAvailableMessages()` сериализованный Envelope декодируется и обогащается штампом `App\Messenger\OutboxMessageStamp($outboxId)` (первичный ключ записи `import_run_outbox`).
   - При редиспатче в шину Messenger штамп сохраняется через транспортный сериализатор (`SigningSerializer`).
-- **Контекст обработки и точный ACK (`markOutboxAckedById`):**
-  - `MessengerDispatchSubscriber` считывает `OutboxMessageStamp` из Envelope и регистрирует `outboxId` в scoped сервисе `ImportRunContext`.
-  - Хэндлеры импорта (`CatalogImportHandler`, `OffersImportHandler`) при получении подтверждения обработки вызывают точечный метод `ImportRunRepository::markOutboxAckedById($outboxId)`.
-  - Запрос `UPDATE import_run_outbox SET acked_at = NOW() WHERE id = :id AND acked_at IS NULL` гарантирует атомарный ACK строго одной целевой записи без риска случайного квитирования других Outbox-сообщений того же запуска (`run_id`).
+- **Жизненный цикл точного Outbox ACK и сброс контекста:**
+  - Прием сообщения (`WorkerMessageReceivedEvent`): из Envelope считываются `ImportRunStamp` и `OutboxMessageStamp`, инициализируя scoped-состояние в `ImportRunContext`.
+  - Успешная обработка (`WorkerMessageHandledEvent`): вызывается строго после завершения хэндлера и перед `$receiver->ack($envelope)`.
+    * Первичный путь: при наличии `OutboxMessageStamp` вызывается атомарный `markOutboxAckedById($outboxId)`.
+    * Изолированный legacy fallback: при отсутствии штампа вызывается `markOutboxAcked($runId, $attempt)`.
+    * По завершении Outbox ACK выставляется флаг `$importRunContext->setHandledSuccessfully(true)`.
+  - Fail-closed защита при ошибке ACK: если при вызове `markOutboxAckedById` возникает исключение (например, сбой соединения с БД), оно беспрепятственно всплывает наружу, `handledSuccessfully` не выставляется, предотвращая отправку ложного ACK в транспорт брокера.
+  - Очистка контекста и снятие локов (`WorkerRunningEvent`): выполняется в цикле воркера строго после ACK/reject сообщения брокером. В блоке `finally` освобождается сессионный advisory lock (если удерживался) и вызывается `ImportRunContext::reset()`, гарантируя изоляцию между итерациями.
 - **Сквозная E2E-верификация (`OffersRetryLifecycleIntegrationTest`):**
   - Подтвержден полный жизненный цикл ретраев Messenger и перемещения в DLQ (`failed`): задержки экспоненциального бэкоффа (3s, 5s, 9s), сохранение штампа `ImportRunStamp` при трансфере в `failed`, успешный последующий импорт офферов и изоляция сущностей `Product`/`ProductVariant`.
   - Результат изолированного прогона: **PASS, 1 test, 38 assertions, exit code 0** (время 20.14 с, память 24.00 МБ).
