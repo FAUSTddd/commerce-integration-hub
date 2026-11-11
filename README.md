@@ -13,7 +13,7 @@ Enterprise-сервис синхронизации товарных катало
 - **Web**: Nginx (Alpine), проксирующий FastCGI запросы на `app:9000` (порт `8080` на хосте).
 - **PostgreSQL**: PostgreSQL 16 (Alpine) с томом `postgres_data` (порт `5432` на хосте).
 
-## Быстрый запуск
+## Быстрый запуск (Development)
 
 ### 1. Поднятие сервисов
 ```bash
@@ -34,7 +34,159 @@ docker compose exec -T app php bin/console doctrine:schema:validate
 > Это **ожидаемое поведение и намеренное архитектурное исключение**: данный частичный индекс (`WHERE status IN ('PENDING', 'PROCESSING')`) создан миграцией `Version20261102000001` и критически необходим для атомарной дедупликации очередей в PostgreSQL (`ON CONFLICT ... DO NOTHING`). Декларативный маппинг Doctrine ORM не поддерживает предикаты `WHERE` для индексов.
 > **Индекс не должен удаляться. Выполнение команды `doctrine:schema:update --force` категорически запрещено.** Все изменения схемы производятся строго через миграции.
 
-### 4. Запуск всех тестов (Unit + PostgreSQL Integration)
+## Production-развёртывание и эксплуатация
+
+Для изоляции инфраструктуры и безопасности в продакшене используется оверлей `compose.prod.yaml`, сбрасывающий внешнюю публикацию порта PostgreSQL (`5432: !reset []`):
+
+### 1. Запуск стека в Production
+```bash
+docker compose -f compose.yaml -f compose.prod.yaml up -d --build
+```
+
+### 2. Секреты CML (CML_USER и CML_PASSWORD)
+Учетные данные CML для production шифруются через Symfony Secrets Vault:
+```bash
+# Генерация ключей шифрования (ключ расшифровки prod.decrypt.private.php не коммитится в Git!):
+docker compose -f compose.yaml -f compose.prod.yaml exec -T app php bin/console secrets:generate-keys --env=prod
+
+# Сохранение учетных данных в зашифрованное хранилище:
+docker compose -f compose.yaml -f compose.prod.yaml exec -T app php bin/console secrets:set CML_USER --env=prod
+docker compose -f compose.yaml -f compose.prod.yaml exec -T app php bin/console secrets:set CML_PASSWORD --env=prod
+```
+В production-окружении ключ расшифровки передается через защищенную переменную окружения хоста/оркестратора `SYMFONY_DECRYPTION_SECRET` либо монтируется как секретный файл.
+
+### 3. Бесшовный деплой (Zero-Downtime Drain Pipeline)
+Для деплоя без потери in-flight транзакций и активных задач очередей:
+```bash
+./deploy_drain.sh
+```
+Скрипт автоматически использует `-f compose.yaml -f compose.prod.yaml` для всех операций управления жизненным циклом контейнеров.
+
+### 4. Регламент первого production-запуска (Production Deployment Checklist)
+
+Пошаговый регламент и критерии готовности первого запуска:
+
+1. **Экспорт и валидация Production-секретов**:
+   ```bash
+   export SYMFONY_DECRYPTION_SECRET="<base64_secret_key>"
+   docker compose -f compose.yaml -f compose.prod.yaml config --quiet
+   ```
+   - *Критерий PASS*: код возврата `0`. При отсутствии ключа Compose аварийно завершается (`Production decryption secret is required`).
+
+2. **Резервная копия PostgreSQL и валидация архива**:
+   ```bash
+   # Снятие дампа через бинарный поток (STDOUT хоста):
+   docker compose exec -T postgres pg_dump -U commerce_user -Fc commerce_db > /tmp/backup_commerce_db_pre_launch.dump
+
+   # Полная проверка целостности архива и оглавления дампа внутри контейнера СУБД:
+   docker compose exec -T postgres pg_restore -l < /tmp/backup_commerce_db_pre_launch.dump > /dev/null
+   ```
+   - *Критерий PASS*: файл дампа создан и не пуст; `pg_restore -l` завершается с кодом `0` без обрыва конвейера.
+
+3. **Dry-Run миграций на изолированной копии данных**:
+   ```bash
+   # Подготовка тестовой базы с явным подключением к сервисной БД postgres:
+   docker compose exec -T postgres psql -U commerce_user -d postgres -c "DROP DATABASE IF EXISTS commerce_migration_dry_run;"
+   docker compose exec -T postgres psql -U commerce_user -d postgres -c "CREATE DATABASE commerce_migration_dry_run WITH OWNER commerce_user;"
+
+   # Восстановление дампа в копию с прямым перенаправлением ввода (защита от маскирования ошибок при pipefail) и флагом --exit-on-error:
+   docker compose exec -T postgres pg_restore -U commerce_user -d commerce_migration_dry_run --exit-on-error < /tmp/backup_commerce_db_pre_launch.dump
+
+   # Прогон миграций на копии данных через контейнер приложения:
+   docker compose -f compose.yaml -f compose.prod.yaml run --rm --no-deps \
+     -e DATABASE_URL="postgresql://commerce_user:secret_password@postgres:5432/commerce_migration_dry_run?serverVersion=16&charset=utf8" \
+     app php bin/console doctrine:migrations:migrate --env=prod --no-interaction
+
+   # Очистка изолированной копии:
+   docker compose exec -T postgres psql -U commerce_user -d postgres -c "DROP DATABASE commerce_migration_dry_run;"
+   ```
+   - *Критерий PASS*: восстановление дампа и миграции завершены с кодом `0`.
+
+4. **Строгий порядок запуска сервисов (Сначала схема, затем воркеры)**:
+   ```bash
+   # Шаг 4.1: Старт СУБД и контейнера ядра:
+   docker compose -f compose.yaml -f compose.prod.yaml up -d --no-deps postgres app
+
+   # Шаг 4.2: Применение проверенных миграций к рабочей БД:
+   docker compose -f compose.yaml -f compose.prod.yaml exec -T app php bin/console doctrine:migrations:migrate --env=prod --no-interaction
+
+   # Шаг 4.3: Старт фоновых обработчиков строго ПОСЛЕ обновления схемы:
+   docker compose -f compose.yaml -f compose.prod.yaml up -d --no-deps outbox_publisher worker_catalog worker_offers
+
+   # Шаг 4.4: Валидация сетевой изоляции СУБД:
+   ss -tulpn | grep 5432 || true
+   ```
+   - *Критерий PASS*: порт 5432 не слушает хостовые интерфейсы, сервисы запущены.
+
+5. **Проверка состояния по строгому JSON (Monitor Status)**:
+   ```bash
+   STATUS_JSON=$(docker compose -f compose.yaml -f compose.prod.yaml exec -T app php bin/console monitor:status --env=prod --format=json)
+   echo "$STATUS_JSON" | php -r '
+     $data = json_decode(stream_get_contents(STDIN), true);
+     if (!isset($data["status"]) || $data["status"] !== "HEALTHY") {
+       fwrite(STDERR, "FAIL: status is not HEALTHY
+");
+       exit(1);
+     }
+     if (!empty($data["anomalies"])) {
+       fwrite(STDERR, "FAIL: anomalies detected
+");
+       exit(1);
+     }
+     if (($data["queues"]["failed"]["size"] ?? 0) > 0) {
+       fwrite(STDERR, "FAIL: failed queue has messages
+");
+       exit(1);
+     }
+     echo "STATUS: PASS
+";
+   '
+   ```
+   - *Критерий PASS*: вывод `STATUS: PASS`.
+
+6. **Запуск Ingress трафика**:
+   ```bash
+   docker compose -f compose.yaml -f compose.prod.yaml up -d --no-deps web
+   curl -s -o /dev/null -w "%{http_code}
+" "http://localhost:8080/cml/1c_exchange?type=catalog&mode=checkauth"
+   ```
+   - *Критерий PASS*: HTTP статус 401 или 200.
+
+7. **Регламент безопасного Rollback**:
+   ```bash
+   # Шаг 7.1: Остановка веб-трафика со штатным grace period 900s:
+   docker compose -f compose.yaml -f compose.prod.yaml stop -t 900 web
+
+   # Шаг 7.2: Остановка фоновых воркеров со штатными grace period:
+   docker compose -f compose.yaml -f compose.prod.yaml stop -t 900 worker_catalog
+   docker compose -f compose.yaml -f compose.prod.yaml stop -t 300 worker_offers
+   docker compose -f compose.yaml -f compose.prod.yaml stop -t 30 outbox_publisher
+
+   # Шаг 7.3: Отключение активных соединений с явным подключением к сервисной БД postgres:
+   docker compose exec -T postgres psql -U commerce_user -d postgres -c "
+     SELECT pg_terminate_backend(pid) FROM pg_stat_activity 
+     WHERE datname IN ('commerce_db', 'commerce_db_failed_pre_rollback') AND pid <> pg_backend_pid();
+   "
+
+   # Шаг 7.4: Проверка существования архивной БД без автоматического DROP (защита от потери расследовательских данных):
+   docker compose exec -T postgres psql -U commerce_user -d postgres -v ON_ERROR_STOP=1 -c "
+     DO \$\$
+     BEGIN
+       IF EXISTS (SELECT 1 FROM pg_database WHERE datname = 'commerce_db_failed_pre_rollback') THEN
+         RAISE EXCEPTION 'Target archive database commerce_db_failed_pre_rollback already exists. Manual intervention required to prevent data loss.';
+       END IF;
+     END
+     \$\$;
+   "
+
+   # Шаг 7.5: Ротация БД и восстановление через явное подключение к postgres и прямой ввод:
+   docker compose exec -T postgres psql -U commerce_user -d postgres -c "ALTER DATABASE commerce_db RENAME TO commerce_db_failed_pre_rollback;"
+   docker compose exec -T postgres psql -U commerce_user -d postgres -c "CREATE DATABASE commerce_db WITH OWNER commerce_user;"
+   docker compose exec -T postgres pg_restore -U commerce_user -d commerce_db --exit-on-error < /tmp/backup_commerce_db_pre_launch.dump
+   ```
+   - *Критерий PASS*: код возврата `0`; сбойная БД сохранена как `commerce_db_failed_pre_rollback` для постмортема.
+
+### 5. Запуск всех тестов (Unit + PostgreSQL Integration)
 Создание тестовой БД при первом старте:
 ```bash
 docker compose exec -T postgres psql -U commerce_user -d commerce_db -c "CREATE DATABASE commerce_db_test;" 2>/dev/null || true

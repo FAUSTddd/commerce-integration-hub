@@ -79,6 +79,11 @@
   - Проект Compose: `commerce-integration-hub`.
   - Контейнеры: `commerce_hub_app` (PHP 8.4-FPM), `commerce_hub_web` (Nginx, порт 8080:80), `commerce_hub_postgres` (PostgreSQL 16, порт 5432:5432).
   - Декларированные воркеры: `commerce_hub_worker_catalog`, `commerce_hub_worker_offers` (с флагами `--memory-limit=512M`, `stop_grace_period: 300s`).
+- **Production-стек (`compose.yaml` + `compose.prod.yaml`):**
+  - Запуск: `docker compose -f compose.yaml -f compose.prod.yaml up -d`
+  - Безопасность портов: публикация порта PostgreSQL 5432 наружу аннулируется (`ports: !reset []`), доступ к СУБД разрешен строго внутри docker-сети `app-network`.
+  - Управление секретами: параметры `CML_USER` и `CML_PASSWORD` поставляются через Symfony Secrets Vault (`config/secrets/prod/`) или переменную `SYMFONY_DECRYPTION_SECRET`.
+  - Zero-downtime деплой: `./deploy_drain.sh` использует аргументы `-f compose.yaml -f compose.prod.yaml` во всех командах управления жизненным циклом.
 - **Тестовый изолированный runtime (`/tmp/commerce-hub-worker-test/`):**
   - Проект Compose: `hub_worker_test`.
   - Контейнеры: `hub_worker_test_app`, `hub_worker_test_web`, `hub_worker_test_postgres`, `hub_worker_test_worker_catalog`, `hub_worker_test_worker_offers`.

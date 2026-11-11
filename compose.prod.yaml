@@ -1,0 +1,12 @@
+services:
+  app:
+    environment:
+      SYMFONY_DECRYPTION_SECRET: ${SYMFONY_DECRYPTION_SECRET:?Production decryption secret is required}
+  worker_catalog:
+    environment:
+      SYMFONY_DECRYPTION_SECRET: ${SYMFONY_DECRYPTION_SECRET:?Production decryption secret is required}
+  worker_offers:
+    environment:
+      SYMFONY_DECRYPTION_SECRET: ${SYMFONY_DECRYPTION_SECRET:?Production decryption secret is required}
+  postgres:
+    ports: !reset []

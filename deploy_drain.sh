@@ -4,19 +4,22 @@ set -Ee
 WEB_STOPPED=0
 PUBLISHER_STOPPED=0
 
+# Поддержка production compose файлов
+COMPOSE_PROD_ARGS="-f compose.yaml -f compose.prod.yaml"
+
 cleanup() {
     local rc=$?
     trap - ERR EXIT
     if [ "$rc" -ne 0 ]; then
         if [ "$PUBLISHER_STOPPED" -eq 1 ]; then
             echo "[DEPLOY CLEANUP] Pipeline terminated abnormally (exit code $rc). Restoring outbox publisher..." >&2
-            if ! docker compose up -d --no-deps outbox_publisher 2>&1; then
+            if ! docker compose $COMPOSE_PROD_ARGS up -d --no-deps outbox_publisher 2>&1; then
                 echo "[DEPLOY CLEANUP][CRITICAL] Failed to restore outbox_publisher container! Manual intervention required." >&2
             fi
         fi
         if [ "$WEB_STOPPED" -eq 1 ]; then
             echo "[DEPLOY CLEANUP] Pipeline terminated abnormally (exit code $rc). Restoring web ingress..." >&2
-            if ! docker compose up -d --no-deps web 2>&1; then
+            if ! docker compose $COMPOSE_PROD_ARGS up -d --no-deps web 2>&1; then
                 echo "[DEPLOY CLEANUP][CRITICAL] Failed to restore web ingress container! Manual intervention required." >&2
             fi
         fi
@@ -31,14 +34,14 @@ trap 'exit 143' TERM
 
 # 1. Graceful Ingress Stop (PID 1 Nginx штатно завершает активные HTTP-запросы)
 WEB_STOPPED=1
-docker stop -t 900 commerce_hub_web
+docker compose $COMPOSE_PROD_ARGS stop -t 900 web
 
 # 2. Остановка Outbox Publisher с ожиданием graceful shutdown (30s)
 PUBLISHER_STOPPED=1
-docker compose stop -t 30 outbox_publisher
+docker compose $COMPOSE_PROD_ARGS stop -t 30 outbox_publisher
 
 # 3. Ожидание завершения открытых PostgreSQL-транзакций (30s таймаут с дампом при сбое)
-docker compose exec -T app php -r '
+docker compose $COMPOSE_PROD_ARGS exec -T app php -r '
 require_once "/var/www/html/vendor/autoload.php";
 $kernel = new App\Kernel("prod", false);
 $kernel->boot();
@@ -59,7 +62,7 @@ while (true) {
 '
 
 # 4. Zero-Flight Watchdog (45 минут таймаут, строгий COUNT(*))
-docker compose exec -T app php -r '
+docker compose $COMPOSE_PROD_ARGS exec -T app php -r '
 require_once "/var/www/html/vendor/autoload.php";
 $kernel = new App\Kernel("prod", false);
 $kernel->boot();
@@ -78,12 +81,12 @@ while (true) {
 '
 
 # 5. Graceful Workers Stop (отправка SIGTERM и ожидание stop_grace_period)
-docker compose stop worker_catalog worker_offers
+docker compose $COMPOSE_PROD_ARGS stop worker_catalog worker_offers
 
 # 6. Миграции БД
-docker compose exec -T app php bin/console doctrine:migrations:migrate --no-interaction
+docker compose $COMPOSE_PROD_ARGS exec -T app php bin/console doctrine:migrations:migrate --no-interaction
 
 # 7. Запуск обновлённых контейнеров и восстановление Ingress (delayed/outbox сообщения сохраняются)
-docker compose up -d --no-deps worker_catalog worker_offers outbox_publisher web
+docker compose $COMPOSE_PROD_ARGS up -d --no-deps worker_catalog worker_offers outbox_publisher web
 WEB_STOPPED=0
 PUBLISHER_STOPPED=0
