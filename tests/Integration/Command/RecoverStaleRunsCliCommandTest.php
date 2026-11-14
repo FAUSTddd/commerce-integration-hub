@@ -340,6 +340,7 @@ Parent: %s", $cleanupException->getMessage(), $parentException->getMessage()),
         $encoded = $this->serializer->encode($envelope);
 
         $now = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
+        $twoHoursAgo = $now->modify('-2 hours');
         $msgId = $this->connection->fetchOne(
             'INSERT INTO messenger_messages (body, headers, queue_name, created_at, available_at, delivered_at)
              VALUES (:body, :headers, :queue, :created, :available, NULL)
@@ -348,8 +349,8 @@ Parent: %s", $cleanupException->getMessage(), $parentException->getMessage()),
                 'body' => $encoded['body'],
                 'headers' => json_encode($encoded['headers'] ?? []),
                 'queue' => 'catalog',
-                'created' => $now->format('Y-m-d H:i:s'),
-                'available' => $now->format('Y-m-d H:i:s'),
+                'created' => $twoHoursAgo->format('Y-m-d H:i:s'),
+                'available' => $twoHoursAgo->format('Y-m-d H:i:s'),
             ]
         );
         $this->createdMessageIds[] = (int) $msgId;
