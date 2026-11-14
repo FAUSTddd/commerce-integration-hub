@@ -56,7 +56,7 @@ jobs:
 
     env:
       APP_ENV: test
-      DATABASE_URL: "postgresql://test_user:***@127.0.0.1:5432/commerce_db_test?serverVersion=16&charset=utf8"
+      DATABASE_URL: "postgresql://test_user:test_password@127.0.0.1:5432/commerce_db?serverVersion=16&charset=utf8"
       MESSENGER_TRANSPORT_DSN: "doctrine://default?auto_setup=0"
 
     steps:
