@@ -1,0 +1,243 @@
+{% extends 'admin/base.html.twig' %}
+
+{% block page_title %}System Overview{% endblock %}
+
+{% block content %}
+    <div class="grid">
+        <div class="card" id="card-active-runs">
+            <div class="card-title">Active Import Runs</div>
+            <div class="card-value" id="val-active-runs">{{ overview.activeRuns|length }}</div>
+        </div>
+        <div class="card" id="card-system-status">
+            <div class="card-title">System Status</div>
+            <div class="card-value" id="val-system-status">{{ overview.status }}</div>
+        </div>
+        <div class="card" id="card-anomalies">
+            <div class="card-title">Active Anomalies</div>
+            <div class="card-value" id="val-anomalies">{{ overview.anomalies|length }}</div>
+        </div>
+    </div>
+
+    <div id="anomalies-container" class="card" style="margin-bottom: 2rem; border-color: rgba(239, 68, 68, 0.4); {% if overview.anomalies|length == 0 %}display: none;{% endif %}">
+        <div class="card-title" style="color: var(--danger); font-weight: 600;">Detected Anomalies</div>
+        <ul id="anomalies-list" style="margin-left: 1.5rem; margin-top: 0.5rem; color: #fca5a5;">
+            {% for anomaly in overview.anomalies %}
+                <li>{{ anomaly }}</li>
+            {% endfor %}
+        </ul>
+    </div>
+
+    <div class="card" style="margin-bottom: 2rem;">
+        <div class="card-title">Queues Status</div>
+        <table>
+            <thead>
+                <tr>
+                    <th>Queue Name</th>
+                    <th>Pending</th>
+                    <th>In Flight</th>
+                    <th>Delayed</th>
+                    <th>Oldest Age (sec)</th>
+                </tr>
+            </thead>
+            <tbody id="dashboard-queues-body">
+                {% for queue in overview.queueMetrics %}
+                    <tr id="queue-row-{{ queue.queueName }}">
+                        <td><strong>{{ queue.queueName }}</strong></td>
+                        <td class="queue-pending">{{ queue.pendingCount }}</td>
+                        <td class="queue-inflight">{{ queue.inFlightCount }}</td>
+                        <td class="queue-delayed">{{ queue.delayedCount }}</td>
+                        <td class="queue-age">{{ queue.oldestMessageAgeSeconds is null ? '—' : queue.oldestMessageAgeSeconds }}</td>
+                    </tr>
+                {% else %}
+                    <tr>
+                        <td colspan="5" style="text-align: center; color: var(--text-muted);">No queues data available</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <div class="card">
+        <div class="card-title">Outbox Events</div>
+        <table>
+            <thead>
+                <tr>
+                    <th>Unpublished Events</th>
+                    <th>Deferred Retry Events</th>
+                    <th>Oldest Unpublished Age (sec)</th>
+                    <th>Last Published At</th>
+                </tr>
+            </thead>
+            <tbody id="dashboard-outbox-body">
+                {% if overview.outboxMetrics is not null %}
+                    <tr>
+                        <td id="outbox-unpublished">{{ overview.outboxMetrics.unpublishedCount }}</td>
+                        <td id="outbox-deferred">{{ overview.outboxMetrics.deferredRetryCount }}</td>
+                        <td id="outbox-age">{{ overview.outboxMetrics.oldestUnpublishedAgeSeconds is null ? '—' : overview.outboxMetrics.oldestUnpublishedAgeSeconds }}</td>
+                        <td id="outbox-last-published">{{ overview.outboxMetrics.lastPublishedAt is null ? '—' : overview.outboxMetrics.lastPublishedAt|date('Y-m-d H:i:s') }}</td>
+                    </tr>
+                {% else %}
+                    <tr>
+                        <td colspan="4" style="text-align: center; color: var(--text-muted);">No outbox metrics available</td>
+                    </tr>
+                {% endif %}
+            </tbody>
+        </table>
+    </div>
+
+    <script>
+        (function() {
+            'use strict';
+
+            const POLL_INTERVAL_MS = 5000;
+            let timerId = null;
+            let currentController = null;
+            let isPollingActive = true;
+
+            async function fetchHealth() {
+                if (!isPollingActive) {
+                    return;
+                }
+
+                // Protect against overlapping requests
+                if (currentController !== null) {
+                    currentController.abort();
+                }
+
+                currentController = new AbortController();
+                const signal = currentController.signal;
+
+                try {
+                    const response = await fetch('/admin/api/health', {
+                        method: 'GET',
+                        headers: {
+                            'Accept': 'application/json',
+                            'X-Requested-With': 'XMLHttpRequest'
+                        },
+                        signal: signal
+                    });
+
+                    if (!response.ok) {
+                        return;
+                    }
+
+                    const data = await response.json();
+                    updateDashboard(data);
+                } catch (e) {
+                    // Ignore explicit AbortError; silent catch for network errors
+                    if (e && e.name === 'AbortError') {
+                        return;
+                    }
+                } finally {
+                    currentController = null;
+                    if (isPollingActive) {
+                        timerId = setTimeout(fetchHealth, POLL_INTERVAL_MS);
+                    }
+                }
+            }
+
+            function updateDashboard(data) {
+                if (!data) return;
+
+                // Update Overview Cards
+                const valActiveRuns = document.getElementById('val-active-runs');
+                if (valActiveRuns && Array.isArray(data.active_runs)) {
+                    valActiveRuns.textContent = String(data.active_runs.length);
+                }
+
+                const valSystemStatus = document.getElementById('val-system-status');
+                if (valSystemStatus && data.status) {
+                    valSystemStatus.textContent = String(data.status);
+                }
+
+                const valAnomalies = document.getElementById('val-anomalies');
+                if (valAnomalies && Array.isArray(data.anomalies)) {
+                    valAnomalies.textContent = String(data.anomalies.length);
+                }
+
+                // Update Header Status Badge
+                const headerBadge = document.getElementById('header-status-badge');
+                if (headerBadge && data.status) {
+                    headerBadge.textContent = String(data.status);
+                    headerBadge.className = 'badge badge-' + String(data.status).toLowerCase();
+                }
+
+                // Update Anomalies List & Container
+                const anomaliesContainer = document.getElementById('anomalies-container');
+                const anomaliesList = document.getElementById('anomalies-list');
+                if (anomaliesContainer && anomaliesList && Array.isArray(data.anomalies)) {
+                    if (data.anomalies.length > 0) {
+                        anomaliesContainer.style.display = '';
+                        anomaliesList.innerHTML = '';
+                        data.anomalies.forEach(function(anomaly) {
+                            const li = document.createElement('li');
+                            li.textContent = String(anomaly);
+                            anomaliesList.appendChild(li);
+                        });
+                    } else {
+                        anomaliesContainer.style.display = 'none';
+                        anomaliesList.innerHTML = '';
+                    }
+                }
+
+                // Update Queues Table
+                if (data.queues && typeof data.queues === 'object') {
+                    for (const [queueName, queue] of Object.entries(data.queues)) {
+                        const row = document.getElementById('queue-row-' + queueName);
+                        if (row) {
+                            const pendingEl = row.querySelector('.queue-pending');
+                            if (pendingEl && typeof queue.size !== 'undefined') {
+                                pendingEl.textContent = String(queue.size);
+                            }
+                            const ageEl = row.querySelector('.queue-age');
+                            if (ageEl && typeof queue.oldest_message_age_seconds !== 'undefined') {
+                                ageEl.textContent = String(queue.oldest_message_age_seconds);
+                            }
+                        }
+                    }
+                }
+
+                // Update Outbox Table
+                if (data.outbox && typeof data.outbox === 'object') {
+                    const outboxUnpublished = document.getElementById('outbox-unpublished');
+                    if (outboxUnpublished && typeof data.outbox.unpublished_count !== 'undefined') {
+                        outboxUnpublished.textContent = String(data.outbox.unpublished_count);
+                    }
+                    const outboxAge = document.getElementById('outbox-age');
+                    if (outboxAge && typeof data.outbox.max_lag_seconds !== 'undefined') {
+                        outboxAge.textContent = String(data.outbox.max_lag_seconds);
+                    }
+                }
+            }
+
+            function stopPolling() {
+                isPollingActive = false;
+                if (timerId !== null) {
+                    clearTimeout(timerId);
+                    timerId = null;
+                }
+                if (currentController !== null) {
+                    currentController.abort();
+                    currentController = null;
+                }
+            }
+
+            // Cleanup when leaving page or hidden
+            window.addEventListener('beforeunload', stopPolling);
+            window.addEventListener('pagehide', stopPolling);
+            document.addEventListener('visibilitychange', function() {
+                if (document.visibilityState === 'hidden') {
+                    stopPolling();
+                } else if (document.visibilityState === 'visible') {
+                    if (!isPollingActive) {
+                        isPollingActive = true;
+                        fetchHealth();
+                    }
+                }
+            });
+
+            // Start polling timer
+            timerId = setTimeout(fetchHealth, POLL_INTERVAL_MS);
+        })();
+    </script>
+{% endblock %}

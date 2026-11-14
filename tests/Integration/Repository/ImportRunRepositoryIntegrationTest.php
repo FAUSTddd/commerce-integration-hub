@@ -51,6 +51,12 @@ final class ImportRunRepositoryIntegrationTest extends KernelTestCase
              ON import_runs (type, filename)
              WHERE status IN ('PENDING', 'PROCESSING')"
         );
+
+        $this->primaryConn->executeStatement(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uniq_outbox_active_defer
+             ON import_run_outbox (run_id)
+             WHERE kind = 'defer' AND published_at IS NULL"
+        );
     }
 
     protected function tearDown(): void

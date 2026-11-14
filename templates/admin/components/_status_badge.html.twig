@@ -1,0 +1,10 @@
+{% set status_class = status|lower %}
+{% if status_class in ['healthy', 'success', 'done', 'processed'] %}
+    {% set badge_type = 'success' %}
+{% elseif status_class in ['degraded', 'warning', 'processing', 'retry'] %}
+    {% set badge_type = 'warning' %}
+{% else %}
+    {% set badge_type = 'danger' %}
+{% endif %}
+
+<span class="badge badge-{{ badge_type }}">{{ label|default(status) }}</span>

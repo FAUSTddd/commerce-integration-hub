@@ -1,0 +1,80 @@
+{% extends 'admin/base.html.twig' %}
+
+{% block title %}Imports Registry - Commerce Hub Admin{% endblock %}
+
+{% block content %}
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
+        <h2>Imports Registry</h2>
+        <form method="get" action="{{ path('admin_imports_index') }}" style="display: flex; gap: 0.75rem; align-items: center;">
+            <select name="type" style="padding: 0.4rem 0.75rem; background: var(--bg-card); color: var(--text-main); border: 1px solid var(--border); border-radius: 4px;">
+                <option value="">All Types</option>
+                <option value="catalog" {% if current_type == 'catalog' %}selected{% endif %}>Catalog</option>
+                <option value="offers" {% if current_type == 'offers' %}selected{% endif %}>Offers</option>
+            </select>
+            <select name="status" style="padding: 0.4rem 0.75rem; background: var(--bg-card); color: var(--text-main); border: 1px solid var(--border); border-radius: 4px;">
+                <option value="">All Statuses</option>
+                <option value="PENDING" {% if current_status == 'PENDING' %}selected{% endif %}>PENDING</option>
+                <option value="PROCESSING" {% if current_status == 'PROCESSING' %}selected{% endif %}>PROCESSING</option>
+                <option value="SUCCESS" {% if current_status == 'SUCCESS' %}selected{% endif %}>SUCCESS</option>
+                <option value="FAILED" {% if current_status == 'FAILED' %}selected{% endif %}>FAILED</option>
+            </select>
+            <button type="submit" class="btn" style="background: var(--primary); color: white; border: none; padding: 0.4rem 1rem; border-radius: 4px; cursor: pointer;">Filter</button>
+            {% if current_status or current_type %}
+                <a href="{{ path('admin_imports_index') }}" style="font-size: 0.85rem; color: var(--text-muted); text-decoration: none;">Reset</a>
+            {% endif %}
+        </form>
+    </div>
+
+    <div class="card">
+        <table>
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Type</th>
+                    <th>Filename</th>
+                    <th>Status</th>
+                    <th>Attempt</th>
+                    <th>Items</th>
+                    <th>Created At</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for run in paginated.items %}
+                    <tr>
+                        <td><strong>#{{ run.id }}</strong></td>
+                        <td><span style="font-size: 0.85rem; background: rgba(255,255,255,0.05); padding: 0.2rem 0.5rem; border-radius: 4px;">{{ run.type|e }}</span></td>
+                        <td><code style="font-size: 0.85rem;">{{ run.filename|e }}</code></td>
+                        <td>{{ include('admin/components/_status_badge.html.twig', { status: run.status }) }}</td>
+                        <td>{{ run.attempt }}</td>
+                        <td>{{ run.itemsCount }}</td>
+                        <td>{{ run.createdAt|date('Y-m-d H:i:s') }}</td>
+                        <td>
+                            <a href="{{ path('admin_imports_show', { id: run.id }) }}" style="color: var(--primary); text-decoration: none; font-weight: 500;">Details &rarr;</a>
+                        </td>
+                    </tr>
+                {% else %}
+                    <tr>
+                        <td colspan="8" style="text-align: center; color: var(--text-muted); padding: 2rem;">No import runs found matching the criteria.</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+
+        {% if paginated.totalPages > 1 %}
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid var(--border);">
+                <div style="font-size: 0.85rem; color: var(--text-muted);">
+                    Showing page {{ paginated.page }} of {{ paginated.totalPages }} ({{ paginated.totalItems }} total items)
+                </div>
+                <div style="display: flex; gap: 0.5rem;">
+                    {% if paginated.page > 1 %}
+                        <a href="{{ path('admin_imports_index', { page: paginated.page - 1, limit: paginated.limit, status: current_status, type: current_type }) }}" class="btn" style="background: var(--bg-card); border: 1px solid var(--border); color: var(--text-main); padding: 0.3rem 0.75rem; border-radius: 4px; text-decoration: none;">&larr; Prev</a>
+                    {% endif %}
+                    {% if paginated.page < paginated.totalPages %}
+                        <a href="{{ path('admin_imports_index', { page: paginated.page + 1, limit: paginated.limit, status: current_status, type: current_type }) }}" class="btn" style="background: var(--bg-card); border: 1px solid var(--border); color: var(--text-main); padding: 0.3rem 0.75rem; border-radius: 4px; text-decoration: none;">Next &rarr;</a>
+                    {% endif %}
+                </div>
+            </div>
+        {% endif %}
+    </div>
+{% endblock %}
