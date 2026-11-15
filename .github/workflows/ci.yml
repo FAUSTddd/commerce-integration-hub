@@ -102,10 +102,9 @@ jobs:
 
       - name: Run Migrations
         run: |
-          touch .env
-          php bin/console messenger:setup-transports --env=test --no-interaction
-          set +e
           {
+            touch .env && \
+            php bin/console messenger:setup-transports --env=test --no-interaction && \
             php -v && \
             php -m && \
             php -r 'echo "PDO Drivers: " . implode(", ", PDO::getAvailableDrivers()) . PHP_EOL;' && \
