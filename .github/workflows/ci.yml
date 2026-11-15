@@ -29,10 +29,20 @@ jobs:
 
       - name: Warmup Cache for PHPStan Container
         run: |
-          php -v
-          php -m
-          php -r 'echo "PDO Drivers: " . implode(", ", PDO::getAvailableDrivers()) . PHP_EOL;'
-          php bin/console cache:warmup --env=dev -vvv
+          set +e
+          {
+            php -v && \
+            php -m && \
+            php -r 'echo "PDO Drivers: " . implode(", ", PDO::getAvailableDrivers()) . PHP_EOL;' && \
+            php bin/console cache:warmup --env=dev -vvv
+          } > output.log 2>&1
+          STATUS=$?
+          if [ $STATUS -eq 0 ]; then
+            cat output.log
+          else
+            python3 -c 'import os, re; lines = open("output.log").readlines()[-100:]; text = "".join(lines); [text := text.replace(os.environ[v], "***") for v in ("DATABASE_URL", "MESSENGER_TRANSPORT_DSN", "POSTGRES_PASSWORD") if os.environ.get(v)]; text = re.sub(r"://([^:@]+):([^@]+)@", r"://\1:***@", text); text = text[-10000:] if len(text) > 10000 else text; text = text.replace("%", "%25").replace(chr(13), "%0D").replace(chr(10), "%0A"); print(f"::error::{text}")'
+            exit $STATUS
+          fi
         env:
           APP_ENV: dev
           DATABASE_URL: "postgresql://dummy:dummy@127.0.0.1:5432/dummy?serverVersion=16&charset=utf8"
@@ -79,10 +89,20 @@ jobs:
 
       - name: Run Migrations
         run: |
-          php -v
-          php -m
-          php -r 'echo "PDO Drivers: " . implode(", ", PDO::getAvailableDrivers()) . PHP_EOL;'
-          php bin/console doctrine:migrations:migrate --env=test --no-interaction -vvv
+          set +e
+          {
+            php -v && \
+            php -m && \
+            php -r 'echo "PDO Drivers: " . implode(", ", PDO::getAvailableDrivers()) . PHP_EOL;' && \
+            php bin/console doctrine:migrations:migrate --env=test --no-interaction -vvv
+          } > output.log 2>&1
+          STATUS=$?
+          if [ $STATUS -eq 0 ]; then
+            cat output.log
+          else
+            python3 -c 'import os, re; lines = open("output.log").readlines()[-100:]; text = "".join(lines); [text := text.replace(os.environ[v], "***") for v in ("DATABASE_URL", "MESSENGER_TRANSPORT_DSN", "POSTGRES_PASSWORD") if os.environ.get(v)]; text = re.sub(r"://([^:@]+):([^@]+)@", r"://\1:***@", text); text = text[-10000:] if len(text) > 10000 else text; text = text.replace("%", "%25").replace(chr(13), "%0D").replace(chr(10), "%0A"); print(f"::error::{text}")'
+            exit $STATUS
+          fi
 
       - name: Run PHPUnit
         run: vendor/bin/phpunit --colors=always
