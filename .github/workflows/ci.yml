@@ -50,7 +50,16 @@ jobs:
           DATABASE_URL: "postgresql://dummy:***@127.0.0.1:5432/dummy?serverVersion=16&charset=utf8"
 
       - name: Run PHPStan Level 8
-        run: vendor/bin/phpstan analyse src/Admin src/Controller/Admin -c phpstan.dist.neon --level 8
+        run: |
+          set +e
+          vendor/bin/phpstan analyse src/Admin src/Controller/Admin -c phpstan.dist.neon --level 8 > output.log 2>&1
+          STATUS=$?
+          if [ $STATUS -eq 0 ]; then
+            cat output.log
+          else
+            python3 -c 'import os, re; lines = open("output.log").readlines()[-100:]; text = "".join(lines); [text := text.replace(os.environ[v], "***") for v in ("DATABASE_URL", "MESSENGER_TRANSPORT_DSN", "POSTGRES_PASSWORD") if os.environ.get(v)]; text = re.sub(r"://([^:@]+):([^@]+)@", r"://\1:***@", text); text = text[-10000:] if len(text) > 10000 else text; text = text.replace("%", "%25").replace(chr(13), "%0D").replace(chr(10), "%0A"); print(f"::error::{text}")'
+            exit $STATUS
+          fi
 
   phpunit:
     name: PHPUnit Full Suite
@@ -109,4 +118,13 @@ jobs:
           fi
 
       - name: Run PHPUnit
-        run: vendor/bin/phpunit --colors=always
+        run: |
+          set +e
+          vendor/bin/phpunit --colors=always > output.log 2>&1
+          STATUS=$?
+          if [ $STATUS -eq 0 ]; then
+            cat output.log
+          else
+            python3 -c 'import os, re; lines = open("output.log").readlines()[-100:]; text = "".join(lines); [text := text.replace(os.environ[v], "***") for v in ("DATABASE_URL", "MESSENGER_TRANSPORT_DSN", "POSTGRES_PASSWORD") if os.environ.get(v)]; text = re.sub(r"://([^:@]+):([^@]+)@", r"://\1:***@", text); text = text[-10000:] if len(text) > 10000 else text; text = text.replace("%", "%25").replace(chr(13), "%0D").replace(chr(10), "%0A"); print(f"::error::{text}")'
+            exit $STATUS
+          fi
