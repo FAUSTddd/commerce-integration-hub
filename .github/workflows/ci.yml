@@ -13,6 +13,11 @@ jobs:
   phpstan:
     name: PHPStan Level 8 (Admin)
     runs-on: ubuntu-latest
+    env:
+      APP_ENV: dev
+      DEFAULT_URI: "http://localhost:8080"
+      DATABASE_URL: "postgresql://dummy:***@127.0.0.1:5432/dummy?serverVersion=16&charset=utf8"
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -44,10 +49,6 @@ jobs:
             python3 -c 'import os, re; lines = open("output.log").readlines()[-100:]; text = "".join(lines); [text := text.replace(os.environ[v], "***") for v in ("DATABASE_URL", "MESSENGER_TRANSPORT_DSN", "POSTGRES_PASSWORD") if os.environ.get(v)]; text = re.sub(r"://([^:@]+):([^@]+)@", r"://\1:***@", text); text = text[-10000:] if len(text) > 10000 else text; text = text.replace("%", "%25").replace(chr(13), "%0D").replace(chr(10), "%0A"); print(f"::error::{text}")'
             exit $STATUS
           fi
-        env:
-          APP_ENV: dev
-          DEFAULT_URI: "http://localhost:8080"
-          DATABASE_URL: "postgresql://dummy:***@127.0.0.1:5432/dummy?serverVersion=16&charset=utf8"
 
       - name: Run PHPStan Level 8
         run: |
@@ -81,7 +82,8 @@ jobs:
 
     env:
       APP_ENV: test
-      DATABASE_URL: "postgresql://test_user:test_password@127.0.0.1:5432/commerce_db?serverVersion=16&charset=utf8"
+      KERNEL_CLASS: 'App\Kernel'
+      DATABASE_URL: "postgresql://test_user:***@127.0.0.1:5432/commerce_db_test?serverVersion=16&charset=utf8"
       MESSENGER_TRANSPORT_DSN: "doctrine://default?auto_setup=0"
 
     steps:
