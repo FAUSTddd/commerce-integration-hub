@@ -73,11 +73,15 @@ final class RecoverStaleRunsCliCommandTest extends KernelTestCase
         $rawInitialIds = $this->connection->fetchFirstColumn('SELECT id FROM messenger_messages');
         $this->initialQueueMessageIds = array_map('intval', $rawInitialIds);
 
-        // Insert temporary guard messages for baseline PROCESSING runs 8 and 9 so
-        // isRunActivelyHandledByWorker() flags them as protected during command execution
+        // Snapshot existing PROCESSING runs before any test-created runs exist.
+        // Protect only this baseline, never IDs that a test may allocate later.
+        $baselineRunIds = $this->connection->fetchFirstColumn(
+            'SELECT id FROM import_runs WHERE status = :status',
+            ['status' => ImportRun::STATUS_PROCESSING]
+        );
         $now = (new \DateTimeImmutable('now', new \DateTimeZone('UTC')))->format('Y-m-d H:i:s');
-        foreach ([8, 9] as $baselineRunId) {
-            $envelope = new Envelope(new \stdClass(), [new ImportRunStamp($baselineRunId)]);
+        foreach ($baselineRunIds as $baselineRunId) {
+            $envelope = new Envelope(new \stdClass(), [new ImportRunStamp((int) $baselineRunId)]);
             $encoded = $this->serializer->encode($envelope);
 
             $id = $this->connection->fetchOne(
