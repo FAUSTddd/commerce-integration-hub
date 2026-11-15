@@ -46,7 +46,8 @@ jobs:
           fi
         env:
           APP_ENV: dev
-          DATABASE_URL: "postgresql://dummy:dummy@127.0.0.1:5432/dummy?serverVersion=16&charset=utf8"
+          DEFAULT_URI: "http://localhost:8080"
+          DATABASE_URL: "postgresql://dummy:***@127.0.0.1:5432/dummy?serverVersion=16&charset=utf8"
 
       - name: Run PHPStan Level 8
         run: vendor/bin/phpstan analyse src/Admin src/Controller/Admin -c phpstan.dist.neon --level 8
@@ -91,6 +92,7 @@ jobs:
       - name: Run Migrations
         run: |
           touch .env
+          php bin/console messenger:setup-transports --env=test --no-interaction
           set +e
           {
             php -v && \
