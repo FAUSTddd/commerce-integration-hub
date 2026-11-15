@@ -29,6 +29,7 @@ jobs:
 
       - name: Warmup Cache for PHPStan Container
         run: |
+          touch .env
           set +e
           {
             php -v && \
@@ -89,6 +90,7 @@ jobs:
 
       - name: Run Migrations
         run: |
+          touch .env
           set +e
           {
             php -v && \
