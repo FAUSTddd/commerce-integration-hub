@@ -1,0 +1,96 @@
+{% extends 'admin/base.html.twig' %}
+
+{% block page_title %}Products &amp; Inventory{% endblock %}
+
+{% block content %}
+    <div class="card" style="margin-bottom: 1.5rem;">
+        <form method="GET" action="/admin/products" style="display: flex; gap: 1rem; align-items: flex-end; flex-wrap: wrap;">
+            <div>
+                <label for="search" style="display: block; font-size: 0.875rem; color: var(--text-muted); margin-bottom: 0.25rem;">Search by SKU (prefix) or External ID (exact):</label>
+                <input type="text" id="search" name="search" value="{{ catalog.search ?? '' }}" placeholder="e.g. SKU-123 or ext-uuid" style="background: var(--bg-card); border: 1px solid var(--border); color: var(--text-main); padding: 0.5rem 0.75rem; border-radius: 4px; min-width: 280px;">
+            </div>
+            <div>
+                <label for="limit" style="display: block; font-size: 0.875rem; color: var(--text-muted); margin-bottom: 0.25rem;">Per page:</label>
+                <select id="limit" name="limit" style="background: var(--bg-card); border: 1px solid var(--border); color: var(--text-main); padding: 0.5rem 0.75rem; border-radius: 4px;">
+                    <option value="10" {% if catalog.limit == 10 %}selected{% endif %}>10</option>
+                    <option value="25" {% if catalog.limit == 25 %}selected{% endif %}>25</option>
+                    <option value="50" {% if catalog.limit == 50 %}selected{% endif %}>50</option>
+                </select>
+            </div>
+            <button type="submit" style="background: var(--primary); color: #fff; border: none; padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer; font-weight: 500;">Filter</button>
+            {% if catalog.search %}
+                <a href="/admin/products" style="color: var(--text-muted); text-decoration: none; padding: 0.5rem 0.5rem;">Reset</a>
+            {% endif %}
+        </form>
+    </div>
+
+    <div class="card">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+            <div class="card-title" style="margin-bottom: 0;">Products List ({{ catalog.totalItems }} total)</div>
+            <div style="color: var(--text-muted); font-size: 0.875rem;">
+                Page {{ catalog.currentPage }} of {{ catalog.totalPages }}
+            </div>
+        </div>
+
+        <table id="products-table">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>External ID</th>
+                    <th>SKU</th>
+                    <th>Name</th>
+                    <th>Variants</th>
+                    <th>Variants Breakdown (SKU / Price / Stock)</th>
+                    <th>Updated At</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for product in catalog.products %}
+                    <tr class="product-row" id="product-row-{{ product.id }}">
+                        <td><strong>#{{ product.id }}</strong></td>
+                        <td><code>{{ product.externalId }}</code></td>
+                        <td>{{ product.sku ? product.sku : '—' }}</td>
+                        <td>{{ product.name }}</td>
+                        <td><span class="badge">{{ product.variantsCount }}</span></td>
+                        <td>
+                            {% if product.variants is not empty %}
+                                <ul style="list-style: none; padding-left: 0; margin: 0; font-size: 0.875rem;">
+                                    {% for variant in product.variants %}
+                                        <li style="margin-bottom: 0.25rem;">
+                                            <code>{{ variant.externalId }}</code>: <strong>{{ variant.priceFormatted }}</strong> | <span>Stock: {{ variant.stockFormatted }}</span>
+                                        </li>
+                                    {% endfor %}
+                                </ul>
+                            {% else %}
+                                <span style="color: var(--text-muted);">No variants</span>
+                            {% endif %}
+                        </td>
+                        <td>{{ product.updatedAt|date('Y-m-d H:i:s') }}</td>
+                    </tr>
+                {% else %}
+                    <tr id="empty-products-row">
+                        <td colspan="7" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">No products found matching the criteria.</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+
+        {% if catalog.totalPages > 1 %}
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 1.5rem;">
+                <div>
+                    {% if catalog.currentPage > 1 %}
+                        <a href="/admin/products?page={{ catalog.currentPage - 1 }}&limit={{ catalog.limit }}{% if catalog.search %}&search={{ catalog.search|url_encode }}{% endif %}" class="badge" style="text-decoration: none; padding: 0.5rem 0.75rem;">&larr; Previous</a>
+                    {% endif %}
+                </div>
+                <div style="color: var(--text-muted); font-size: 0.875rem;">
+                    Page {{ catalog.currentPage }} of {{ catalog.totalPages }}
+                </div>
+                <div>
+                    {% if catalog.currentPage < catalog.totalPages %}
+                        <a href="/admin/products?page={{ catalog.currentPage + 1 }}&limit={{ catalog.limit }}{% if catalog.search %}&search={{ catalog.search|url_encode }}{% endif %}" class="badge" style="text-decoration: none; padding: 0.5rem 0.75rem;">Next &rarr;</a>
+                    {% endif %}
+                </div>
+            </div>
+        {% endif %}
+    </div>
+{% endblock %}

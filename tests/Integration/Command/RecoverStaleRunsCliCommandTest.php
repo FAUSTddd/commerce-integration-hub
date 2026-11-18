@@ -73,11 +73,15 @@ final class RecoverStaleRunsCliCommandTest extends KernelTestCase
         $rawInitialIds = $this->connection->fetchFirstColumn('SELECT id FROM messenger_messages');
         $this->initialQueueMessageIds = array_map('intval', $rawInitialIds);
 
-        // Insert temporary guard messages for baseline PROCESSING runs 8 and 9 so
-        // isRunActivelyHandledByWorker() flags them as protected during command execution
+        // Snapshot existing PROCESSING runs before any test-created runs exist.
+        // Protect only this baseline, never IDs that a test may allocate later.
+        $baselineRunIds = $this->connection->fetchFirstColumn(
+            'SELECT id FROM import_runs WHERE status = :status',
+            ['status' => ImportRun::STATUS_PROCESSING]
+        );
         $now = (new \DateTimeImmutable('now', new \DateTimeZone('UTC')))->format('Y-m-d H:i:s');
-        foreach ([8, 9] as $baselineRunId) {
-            $envelope = new Envelope(new \stdClass(), [new ImportRunStamp($baselineRunId)]);
+        foreach ($baselineRunIds as $baselineRunId) {
+            $envelope = new Envelope(new \stdClass(), [new ImportRunStamp((int) $baselineRunId)]);
             $encoded = $this->serializer->encode($envelope);
 
             $id = $this->connection->fetchOne(
@@ -340,6 +344,7 @@ Parent: %s", $cleanupException->getMessage(), $parentException->getMessage()),
         $encoded = $this->serializer->encode($envelope);
 
         $now = new \DateTimeImmutable('now', new \DateTimeZone('UTC'));
+        $twoHoursAgo = $now->modify('-2 hours');
         $msgId = $this->connection->fetchOne(
             'INSERT INTO messenger_messages (body, headers, queue_name, created_at, available_at, delivered_at)
              VALUES (:body, :headers, :queue, :created, :available, NULL)
@@ -348,8 +353,8 @@ Parent: %s", $cleanupException->getMessage(), $parentException->getMessage()),
                 'body' => $encoded['body'],
                 'headers' => json_encode($encoded['headers'] ?? []),
                 'queue' => 'catalog',
-                'created' => $now->format('Y-m-d H:i:s'),
-                'available' => $now->format('Y-m-d H:i:s'),
+                'created' => $twoHoursAgo->format('Y-m-d H:i:s'),
+                'available' => $twoHoursAgo->format('Y-m-d H:i:s'),
             ]
         );
         $this->createdMessageIds[] = (int) $msgId;

@@ -15,6 +15,11 @@
         <ini name="error_reporting" value="-1" />
         <server name="APP_ENV" value="test" force="true" />
         <server name="SHELL_VERBOSITY" value="-1" />
+        <server name="ADMIN_USER" value="admin" force="true" />
+        <server name="ADMIN_PASSWORD_HASH" value="$2y$04$5cXtV/6CukDcCTLwIovLn.ZOI/Q7U9fgzka6qSowerRAmes2VkKdK" force="true" />
+        <server name="ADMIN_CHANNEL_REQUIREMENT" value="http" force="true" />
+        <server name="CML_USER" value="admin" force="true" />
+        <server name="CML_PASSWORD" value="secret_cml_password" force="true" />
     </php>
 
     <testsuites>

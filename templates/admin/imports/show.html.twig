@@ -1,0 +1,122 @@
+{% extends 'admin/base.html.twig' %}
+
+{% block title %}Import Run #{{ run.id }} - Commerce Hub Admin{% endblock %}
+
+{% block content %}
+    <div style="margin-bottom: 1.5rem;">
+        <a href="{{ path('admin_imports_index') }}" style="color: var(--text-muted); text-decoration: none; font-size: 0.9rem;">&larr; Back to Registry</a>
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 0.5rem;">
+            <h2>Import Run #{{ run.id }}</h2>
+            <div>{{ include('admin/components/_status_badge.html.twig', { status: run.status }) }}</div>
+        </div>
+    </div>
+
+    <div class="metrics-grid">
+        <div class="card">
+            <div class="card-title">Run Summary</div>
+            <table>
+                <tbody>
+                    <tr>
+                        <th style="width: 30%;">Type</th>
+                        <td><span style="font-size: 0.85rem; background: rgba(255,255,255,0.05); padding: 0.2rem 0.5rem; border-radius: 4px;">{{ run.type|e }}</span></td>
+                    </tr>
+                    <tr>
+                        <th>Filename</th>
+                        <td><code>{{ run.filename|e }}</code></td>
+                    </tr>
+                    <tr>
+                        <th>File Hash</th>
+                        <td><code style="font-size: 0.8rem; word-break: break-all;">{{ run.fileHash|e }}</code></td>
+                    </tr>
+                    <tr>
+                        <th>Items Count</th>
+                        <td><strong>{{ run.itemsCount }}</strong></td>
+                    </tr>
+                    <tr>
+                        <th>Attempt</th>
+                        <td>{{ run.attempt }}</td>
+                    </tr>
+                    <tr>
+                        <th>Fencing Token</th>
+                        <td><code>{{ run.fencingToken is null ? '—' : run.fencingToken|e }}</code></td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="card">
+            <div class="card-title">Execution Timestamps</div>
+            <table>
+                <tbody>
+                    <tr>
+                        <th style="width: 40%;">Created At</th>
+                        <td>{{ run.createdAt|date('Y-m-d H:i:s') }}</td>
+                    </tr>
+                    <tr>
+                        <th>Started At</th>
+                        <td>{{ run.startedAt is null ? '—' : run.startedAt|date('Y-m-d H:i:s') }}</td>
+                    </tr>
+                    <tr>
+                        <th>Finished At</th>
+                        <td>{{ run.finishedAt is null ? '—' : run.finishedAt|date('Y-m-d H:i:s') }}</td>
+                    </tr>
+                    <tr>
+                        <th>Retry Scheduled At</th>
+                        <td>{{ run.retryScheduledAt is null ? '—' : run.retryScheduledAt|date('Y-m-d H:i:s') }}</td>
+                    </tr>
+                    <tr>
+                        <th>Has Deferred Retry</th>
+                        <td>
+                            {% if run.hasDeferredRetry %}
+                                <span style="color: var(--warning); font-weight: bold;">YES</span>
+                            {% else %}
+                                <span style="color: var(--text-muted);">NO</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    {% if run.sanitizedError is not null %}
+        <div class="card" style="border-left: 4px solid var(--danger); margin-bottom: 2rem;">
+            <div class="card-title" style="color: var(--danger);">Execution Error (Sanitized)</div>
+            <pre style="background: rgba(0,0,0,0.3); padding: 1rem; border-radius: 4px; overflow-x: auto; color: #ff8080; font-size: 0.9rem; margin-top: 0.5rem; white-space: pre-wrap; word-break: break-all;">{{ run.sanitizedError|e }}</pre>
+        </div>
+    {% endif %}
+
+    <div class="card">
+        <div class="card-title">Associated Outbox Events</div>
+        <table>
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Kind</th>
+                    <th>Queue</th>
+                    <th>Idempotency Key</th>
+                    <th>Available At</th>
+                    <th>Published At</th>
+                    <th>Acked At</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for event in run.outboxEvents %}
+                    <tr>
+                        <td><strong>#{{ event.id }}</strong></td>
+                        <td><span style="font-size: 0.85rem; background: rgba(255,255,255,0.05); padding: 0.2rem 0.5rem; border-radius: 4px;">{{ event.kind|e }}</span></td>
+                        <td><code>{{ event.queueName|e }}</code></td>
+                        <td><code style="font-size: 0.8rem;">{{ event.idempotencyKey|e }}</code></td>
+                        <td>{{ event.availableAt|date('Y-m-d H:i:s') }}</td>
+                        <td>{{ event.publishedAt is null ? '—' : event.publishedAt|date('Y-m-d H:i:s') }}</td>
+                        <td>{{ event.ackedAt is null ? '—' : event.ackedAt|date('Y-m-d H:i:s') }}</td>
+                    </tr>
+                {% else %}
+                    <tr>
+                        <td colspan="7" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">No outbox events associated with this run.</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+{% endblock %}

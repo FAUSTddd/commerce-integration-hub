@@ -1,0 +1,103 @@
+{% extends 'admin/base.html.twig' %}
+
+{% block title %}Queues & Outbox - Commerce Hub Admin{% endblock %}
+{% block page_title %}Queues & Outbox Monitoring{% endblock %}
+
+{% block content %}
+    {% if overview.workerStarvationDetected %}
+        <div style="background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.4); border-radius: 8px; padding: 1rem 1.25rem; margin-bottom: 2rem; color: #fca5a5; display: flex; align-items: center; justify-content: space-between;">
+            <div>
+                <strong style="color: #ef4444; font-size: 1rem;">⚠️ Worker Starvation Warning:</strong>
+                <span style="margin-left: 0.5rem; font-size: 0.875rem;">Messages have been pending for > 15 minutes without being consumed. Workers may be stalled or scaled down.</span>
+            </div>
+            <span class="badge badge-critical">Attention Needed</span>
+        </div>
+    {% endif %}
+
+    <div class="grid">
+        <div class="card">
+            <div class="card-title">Outbox Unpublished Messages</div>
+            <div class="card-value">{{ overview.outbox.unpublished_count }}</div>
+        </div>
+        <div class="card">
+            <div class="card-title">Outbox Max Lag</div>
+            <div class="card-value">{{ overview.outbox.max_lag_seconds }}s</div>
+        </div>
+        <div class="card">
+            <div class="card-title">Stale Defers (>15m)</div>
+            <div class="card-value" {% if overview.outbox.stale_defers_count > 0 %}style="color: var(--danger);"{% endif %}>
+                {{ overview.outbox.stale_defers_count }}
+            </div>
+        </div>
+    </div>
+
+    <section class="card" style="margin-bottom: 2rem;">
+        <h3 style="margin-bottom: 1rem; font-size: 1.125rem;">Messenger Transports</h3>
+        <table id="queues-table">
+            <thead>
+                <tr>
+                    <th>Queue / Transport</th>
+                    <th>Pending Messages</th>
+                    <th>Oldest Age</th>
+                    <th>Health Status</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for queue in overview.queues %}
+                    <tr>
+                        <td><strong>{{ queue.name }}</strong></td>
+                        <td>{{ queue.size }}</td>
+                        <td>{{ queue.oldest_message_age_seconds }}s</td>
+                        <td>
+                            {% if queue.status == 'OK' %}
+                                <span class="badge badge-healthy">OK</span>
+                            {% elseif queue.status == 'WARN' %}
+                                <span class="badge badge-degraded">WARN</span>
+                            {% else %}
+                                <span class="badge badge-critical">{{ queue.status }}</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% else %}
+                    <tr>
+                        <td colspan="4" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">No queues configured.</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </section>
+
+    <section class="card">
+        <h3 style="margin-bottom: 1rem; font-size: 1.125rem;">Recent Unpublished Outbox Entries</h3>
+        <table id="outbox-table">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>Run ID</th>
+                    <th>Attempt</th>
+                    <th>Kind</th>
+                    <th>Queue</th>
+                    <th>Available At</th>
+                    <th>Created At</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for item in overview.outbox.recent_unpublished %}
+                    <tr>
+                        <td>#{{ item.id }}</td>
+                        <td><a href="/admin/imports/{{ item.runId }}" style="color: var(--primary); text-decoration: none;">#{{ item.runId }}</a></td>
+                        <td>{{ item.attempt }}</td>
+                        <td><span class="badge badge-degraded">{{ item.kind }}</span></td>
+                        <td>{{ item.queueName }}</td>
+                        <td>{{ item.availableAt|date('Y-m-d H:i:s') }}</td>
+                        <td>{{ item.createdAt|date('Y-m-d H:i:s') }}</td>
+                    </tr>
+                {% else %}
+                    <tr>
+                        <td colspan="7" style="text-align: center; color: var(--text-muted); padding: 1.5rem;">Outbox is clean. No pending events.</td>
+                    </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </section>
+{% endblock %}
